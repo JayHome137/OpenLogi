@@ -60,6 +60,7 @@ pub use session::gesture::{
 pub use session::host_switch::{
     HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionFailure, HostSwitchSessionOutcome,
     HostSwitchStopReason, PendingHostSwitchRestore, run_host_switch_session, switch_host_on,
+    switch_hosts,
     switch_linked_hosts,
 };
 pub use session::keyboard::{
