@@ -63,9 +63,11 @@ fn empty_flow_section_uses_defaults() {
     for source in ["schema_version = 7\n", "schema_version = 7\n\n[flow]\n"] {
         let config: Config = toml::from_str(source).expect("empty Flow config must parse");
         assert_eq!(config.flow, FlowConfig::default());
-        assert!(!toml::to_string_pretty(&config)
-            .expect("serialize default Flow config")
-            .contains("[flow]"));
+        assert!(
+            !toml::to_string_pretty(&config)
+                .expect("serialize default Flow config")
+                .contains("[flow]")
+        );
     }
 }
 
