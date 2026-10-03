@@ -18,8 +18,8 @@ use openlogi_fixture::{
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
-    ConfigReloadError, ForegroundApps, Generation, Identity, InventoryHealth, MonitorEvent,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    ConfigReloadError, FlowStatus, ForegroundApps, Generation, Identity, InventoryHealth,
+    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
     PairingUpdate, RingObservation,
 };
 use tarpc::client::RpcError;
@@ -393,6 +393,7 @@ fn fixture_agent() -> TestAgent {
             }),
             recent: Vec::new(),
         },
+        flow: FlowStatus::default(),
     };
     TestAgent::from_profile(profile, snapshot)
 }

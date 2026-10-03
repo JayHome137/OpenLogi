@@ -34,8 +34,8 @@ use openlogi_core::config::FunctionKey;
 use super::cursor::{MonitorDpi, PhysicalCursorPosition};
 use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
+    ButtonId, CursorPosition, CursorSample, EventDisposition, ForegroundApp, HookBackend,
+    HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
 
 const WHEEL_DELTA: f64 = 120.0;
@@ -484,7 +484,18 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         }),
         WM_MOUSEMOVE => {
             let (delta_x, delta_y) = motion_delta(previous?, data.pt)?;
-            Some(MouseEvent::Moved { delta_x, delta_y })
+            Some(MouseEvent::Moved {
+                delta_x,
+                delta_y,
+                cursor: Some(CursorSample {
+                    position: CursorPosition {
+                        x: f64::from(data.pt.x),
+                        y: f64::from(data.pt.y),
+                    },
+                    timestamp: std::time::Instant::now(),
+                    control_down: key_held(VK_CONTROL),
+                }),
+            })
         }
         _ => None,
     }
@@ -653,7 +664,8 @@ mod tests {
             translate_event(WM_MOUSEMOVE as WPARAM, at(560, 395)),
             Some(MouseEvent::Moved {
                 delta_x: 60,
-                delta_y: -5
+                delta_y: -5,
+                cursor: Some(_),
             })
         ));
         assert!(

@@ -40,6 +40,24 @@ pub use openlogi_core::scroll::ScrollDelta;
 
 pub mod edge;
 
+#[cfg(target_os = "macos")]
+mod displays;
+#[cfg(target_os = "windows")]
+mod displays_windows;
+
+/// Return active display bounds in the coordinate space used by Flow cursor samples.
+#[must_use]
+pub fn display_rects() -> Option<Vec<edge::DisplayRect>> {
+    #[cfg(target_os = "macos")]
+    return displays::display_rects();
+    #[cfg(target_os = "linux")]
+    return None;
+    #[cfg(target_os = "windows")]
+    return displays_windows::display_rects();
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
+    None
+}
+
 mod pointer;
 pub use pointer::{
     PointerContext, PointerTarget, pointer_context, pointer_context_supported,
@@ -51,17 +69,24 @@ pub use pointer::{
 /// sources (IOKit, evdev) hand it back as a `u32`.
 pub const LOGITECH_VENDOR_ID: u32 = openlogi_core::hid::LOGITECH_VENDOR_ID as u32;
 
-/// Cursor position in the operating system's global screen coordinate space,
-/// scaled so it lines up with GPUI's own logical (DIP) display bounds — the
-/// Windows backend divides physical `GetCursorPos` pixels by the cursor's
-/// monitor DPI scale to match; macOS `CGEvent` points and Linux root-window
-/// coordinates are already resolution-independent.
+/// Cursor position in the operating system's global screen coordinate space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct CursorPosition {
     /// Horizontal screen coordinate.
     pub x: f64,
     /// Vertical screen coordinate.
     pub y: f64,
+}
+
+/// One monotonic cursor observation produced by a native input event.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CursorSample {
+    /// Cursor position in the platform coordinate space matching its display bounds.
+    pub position: CursorPosition,
+    /// Timestamp from this process's monotonic clock.
+    pub timestamp: std::time::Instant,
+    /// Whether Control was held at this cursor observation.
+    pub control_down: bool,
 }
 
 /// Best-effort identity for the physical device that produced an OS event.
@@ -179,6 +204,9 @@ pub enum MouseEvent {
         delta_x: i32,
         /// Positive = down, negative = up.
         delta_y: i32,
+        /// Absolute cursor sample where this platform can provide one without
+        /// querying a blocking window-system API from the hook callback.
+        cursor: Option<CursorSample>,
     },
     /// The OS interrupted event capture (on macOS, the tap was disabled by a
     /// timeout or by competing user input). Any in-progress gesture hold must be

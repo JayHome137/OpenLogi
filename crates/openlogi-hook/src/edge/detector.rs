@@ -30,7 +30,7 @@ impl ArmedSides {
     }
 }
 
-/// Cursor velocity in logical pixels per second.
+/// Cursor velocity in the platform's screen-coordinate units per second.
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Velocity {
     /// Horizontal velocity; positive points right.
@@ -78,8 +78,8 @@ pub struct EdgeDetectorParams {
     /// Continuous edge contact required for a low-speed crossing.
     /// Default: 250 ms.
     pub dwell_time: Duration,
-    /// Outward approach velocity that triggers immediately, in logical pixels
-    /// per second. Default: 900 px/s.
+    /// Outward approach velocity that triggers immediately in screen-coordinate
+    /// units per second. Default: 900 units/s.
     pub arrival_velocity_threshold: f64,
     /// Distance from every armed exposed segment required before another
     /// approach can trigger. Default: 12 logical pixels.

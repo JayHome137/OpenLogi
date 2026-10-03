@@ -34,6 +34,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     DeviceCapturePlan, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
+use crate::flow::{FlowController, FlowDeviceSnapshot};
 use crate::hardware::{
     DeviceAccess, DeviceOp, FnLockOrder, HardwareContext, VolatileMouseSettings,
 };
@@ -123,6 +124,8 @@ pub struct SharedHandles {
     pub receiver_access: ReceiverAccess,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Flow networking and handoff runtime, armed with the agent lifecycle.
+    pub flow: FlowController,
     /// Orders every path's Fn-lock writes per keyboard.
     fn_lock_order: FnLockOrder,
     /// The running inventory watcher's refresh handle, published at arming;
@@ -310,9 +313,17 @@ impl Orchestrator {
         let (capture_plans_tx, capture_plans) = watch::channel(Arc::new(Vec::new()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
+        let channel_pool = hardware.channel_pool();
+        let receiver_access = ReceiverAccess::default();
+        let flow = FlowController::new(
+            config.flow.clone(),
+            Arc::clone(&observable),
+            channel_pool.clone(),
+            receiver_access.clone(),
+        );
         let shared = SharedHandles {
             device_io: hardware.device_io(),
-            channel_pool: hardware.channel_pool(),
+            channel_pool,
             hardware,
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
@@ -327,8 +338,9 @@ impl Orchestrator {
             keyboard_spec,
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
-            receiver_access: ReceiverAccess::default(),
+            receiver_access,
             host_switch_links,
+            flow,
             fn_lock_order: FnLockOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
@@ -527,6 +539,19 @@ impl Orchestrator {
             host_switch_links(&self.config, &self.devices),
         );
         publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
+        self.shared.flow.update_devices(
+            self.devices
+                .iter()
+                .map(|device| FlowDeviceSnapshot {
+                    config_key: device.config_key.clone(),
+                    route: device.route.clone(),
+                    serial: device.serial.clone(),
+                    unit_id: device.unit_id,
+                    kind: device.kind,
+                    online: device.online,
+                })
+                .collect(),
+        );
     }
 
     fn publish_capture_plans(&self) {
@@ -1005,6 +1030,7 @@ impl Orchestrator {
     /// Replace the config (after `config.toml` changed) and rebuild everything.
     pub fn reload_config(&mut self, config: Config) {
         let previous = std::mem::replace(&mut self.config, config);
+        self.shared.flow.update_config(&self.config.flow);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.shared.scroll_preferences.publish(

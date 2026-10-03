@@ -1,6 +1,6 @@
 use super::EdgeSide;
 
-/// A validated display rectangle in global logical-pixel coordinates.
+/// A validated display rectangle in the platform's global cursor coordinate space.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct DisplayRect {
     x: f64,
@@ -97,7 +97,7 @@ pub trait DisplayGeometryProvider {
     /// Platform-specific enumeration error.
     type Error;
 
-    /// Return the current display rectangles in global logical-pixel coordinates.
+    /// Return the current display rectangles in global cursor coordinates.
     fn display_rects(&self) -> Result<Vec<DisplayRect>, Self::Error>;
 }
 

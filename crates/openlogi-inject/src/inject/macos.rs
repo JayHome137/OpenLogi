@@ -1,5 +1,6 @@
 //! Platform helpers for synthesising OS-level input events on macOS.
 
+use core_graphics::display::CGDisplay;
 use core_graphics::event::{
     CGEvent, CGEventFlags, CGEventTapLocation, CGEventType, CGMouseButton, EventField,
 };
@@ -15,6 +16,12 @@ use openlogi_core::binding::{
 use openlogi_core::config::FunctionKey;
 
 use super::{HeldKey, HeldModifiers, KeyPhase};
+
+pub(super) fn warp_cursor(x: f64, y: f64) -> bool {
+    x.is_finite()
+        && y.is_finite()
+        && CGDisplay::warp_mouse_cursor_position(CGPoint::new(x, y)).is_ok()
+}
 
 /// Shared resolver for private ApplicationServices SPI used by the Dock and
 /// symbolic-hotkey helpers.

@@ -384,10 +384,12 @@ fn translate(event: &evdev::InputEvent, hires_scroll: bool) -> Option<MouseEvent
             RelativeAxisCode::REL_X => Some(MouseEvent::Moved {
                 delta_x: value,
                 delta_y: 0,
+                cursor: None,
             }),
             RelativeAxisCode::REL_Y => Some(MouseEvent::Moved {
                 delta_x: 0,
                 delta_y: value,
+                cursor: None,
             }),
             _ => {
                 let v = f64::from(value);
@@ -644,7 +646,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Moved {
                 delta_x: 7,
-                delta_y: 0
+                delta_y: 0,
+                cursor: None,
             })
         );
     }
@@ -656,7 +659,8 @@ mod tests {
             translate(&event, false),
             Some(MouseEvent::Moved {
                 delta_x: 0,
-                delta_y: -4
+                delta_y: -4,
+                cursor: None,
             })
         );
     }

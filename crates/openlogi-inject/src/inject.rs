@@ -303,6 +303,26 @@ pub fn execute(action: &Action) {
     }
 }
 
+/// Move the system cursor to global screen coordinates on macOS or Windows.
+///
+/// Coordinates use Quartz points on macOS and physical pixels on Windows.
+/// Returns `false` for non-finite/out-of-range coordinates or native failure.
+#[must_use]
+pub fn warp_cursor(x: f64, y: f64) -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::warp_cursor(x, y);
+    #[cfg(target_os = "windows")]
+    return windows::warp_cursor(x, y);
+    #[cfg(any(
+        target_os = "linux",
+        not(any(target_os = "macos", target_os = "windows"))
+    ))]
+    {
+        let _ = (x, y);
+        false
+    }
+}
+
 /// One synthetic held chord, released exactly once when dropped.
 ///
 /// Keep this value with the physical press lifecycle. Replacing its chord

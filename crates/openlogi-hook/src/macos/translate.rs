@@ -9,7 +9,9 @@ use core_graphics::event::{CGEvent, CGEventField, CGEventFlags, CGEventType, Eve
 use tracing::debug;
 
 use super::sender::{event_sender_id, sender_device_info};
-use crate::{ButtonId, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta};
+use crate::{
+    ButtonId, CursorPosition, CursorSample, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
+};
 
 /// Translate a raw OS button number to a [`ButtonId`].
 ///
@@ -29,6 +31,18 @@ fn button_number_to_id(n: i64) -> Option<ButtonId> {
 /// Best-effort device identity for a button event's HID sender.
 fn button_source(event: &CGEvent) -> Option<crate::EventDevice> {
     event_sender_id(event).map(|id| sender_device_info(id).event_device)
+}
+
+fn cursor_sample(event: &CGEvent) -> CursorSample {
+    let point = event.location();
+    CursorSample {
+        position: CursorPosition {
+            x: point.x,
+            y: point.y,
+        },
+        timestamp: std::time::Instant::now(),
+        control_down: event.get_flags().contains(CGEventFlags::CGEventFlagControl),
+    }
 }
 
 /// Map the macOS modifier flags on a `CGEvent` to our [`KeyModifiers`].
@@ -178,6 +192,7 @@ pub(super) fn translate(etype: CGEventType, event: &CGEvent) -> Option<MouseEven
             Some(MouseEvent::Moved {
                 delta_x: dx as i32,
                 delta_y: dy as i32,
+                cursor: Some(cursor_sample(event)),
             })
         }
         CGEventType::TapDisabledByTimeout | CGEventType::TapDisabledByUserInput => {
@@ -276,8 +291,10 @@ fn line_scroll_delta(event: &CGEvent, axis: ScrollAxisFields) -> f64 {
 mod tests {
     use core_graphics::event::{CGEvent, CGEventType, EventField};
     use core_graphics::event_source::{CGEventSource, CGEventSourceStateID};
+    use core_graphics::geometry::CGPoint;
 
-    use super::translate_key;
+    use super::{translate, translate_key};
+    use crate::{CursorPosition, MouseEvent};
 
     fn key_down(vk: u16) -> CGEvent {
         let source = CGEventSource::new(CGEventSourceStateID::Private).expect("an event source");
@@ -294,5 +311,33 @@ mod tests {
             openlogi_inject::SYNTHETIC_EVENT_USER_DATA,
         );
         assert!(translate_key(CGEventType::KeyDown, &event).is_none());
+    }
+
+    #[test]
+    fn mouse_motion_carries_its_global_cursor_position_and_monotonic_time() {
+        let source = CGEventSource::new(CGEventSourceStateID::Private).expect("an event source");
+        let event = CGEvent::new(source).expect("a mouse event");
+        event.set_location(CGPoint::new(-120.0, 340.0));
+
+        let before = std::time::Instant::now();
+        let Some(MouseEvent::Moved {
+            delta_x,
+            delta_y,
+            cursor: Some(sample),
+        }) = translate(CGEventType::MouseMoved, &event)
+        else {
+            panic!("mouse movement should carry a cursor sample");
+        };
+        let after = std::time::Instant::now();
+
+        assert_eq!((delta_x, delta_y), (0, 0));
+        assert_eq!(
+            sample.position,
+            CursorPosition {
+                x: -120.0,
+                y: 340.0
+            }
+        );
+        assert!(sample.timestamp >= before && sample.timestamp <= after);
     }
 }

@@ -79,6 +79,6 @@ fn malformed_flow_entries_are_rejected() {
         "schema_version = 7\n[[flow.layout]]\nedge = \"diagonal\"\npeer = \"peer\"\n",
         "schema_version = 7\n[[flow.devices]]\nkey = \"unit:0f1e2d3c\"\npeer_channels = { self = \"zero\" }\n",
     ] {
-        assert!(toml::from_str::<Config>(source).is_err());
+        toml::from_str::<Config>(source).unwrap_err();
     }
 }
