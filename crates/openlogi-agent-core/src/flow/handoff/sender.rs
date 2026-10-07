@@ -55,6 +55,13 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
         warn!(peer = %peer.name, "Flow edge has no online configured devices to hand off");
         return;
     }
+    if state.remote_holds_any(peer.public_key, &targets) {
+        warn!(
+            peer = %peer.name,
+            "Flow edge ignored because the peer still reports one target device as held"
+        );
+        return;
+    }
 
     let transfer_id = random_transfer_id();
     let mut request = proto::HandoffRequest {

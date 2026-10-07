@@ -12,6 +12,7 @@ use openlogi_flow::discovery::{
 };
 use openlogi_flow::frame::FrameKind;
 use openlogi_flow::generated as proto;
+use openlogi_flow::identity::same_device;
 use openlogi_flow::sas::PublicKey;
 use openlogi_flow::session::{
     LinkState, PeerConfig, PeerSessionHandle, SessionManager, SessionPolicy, TrustedInitialState,
@@ -163,6 +164,7 @@ pub(super) struct GenerationState {
     pub(super) devices: RwLock<Vec<RuntimeDevice>>,
     connections: RwLock<HashMap<PublicKey, Arc<FlowConnection>>>,
     link_states: RwLock<HashMap<PublicKey, LinkState>>,
+    remote_states: RwLock<HashMap<PublicKey, RemotePeerState>>,
     observable: Arc<ObservableState>,
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
@@ -171,6 +173,14 @@ pub(super) struct GenerationState {
     active: AtomicBool,
     pub(super) lifecycle: Mutex<()>,
     pub(super) handoffs: HandoffBook,
+}
+
+#[derive(Clone, Default)]
+struct RemotePeerState {
+    device_revision: u64,
+    devices: Vec<proto::DeviceView>,
+    peer_revision: u64,
+    held: Vec<proto::DeviceIdentity>,
 }
 
 #[derive(Clone)]
@@ -194,6 +204,7 @@ impl GenerationState {
             devices: RwLock::new(devices),
             connections: RwLock::new(HashMap::new()),
             link_states: RwLock::new(HashMap::new()),
+            remote_states: RwLock::new(HashMap::new()),
             observable,
             channel_pool,
             receiver_access,
@@ -241,6 +252,61 @@ impl GenerationState {
                 }
             }
         }
+    }
+
+    pub(super) fn update_remote_devices(
+        &self,
+        peer: PublicKey,
+        announce: proto::AnnounceDevices,
+    ) -> bool {
+        let Ok(mut states) = self.remote_states.write() else {
+            return false;
+        };
+        let state = states.entry(peer).or_default();
+        if announce.revision < state.device_revision {
+            return false;
+        }
+        state.device_revision = announce.revision;
+        state.devices = announce.devices;
+        true
+    }
+
+    pub(super) fn update_remote_state(
+        &self,
+        peer: PublicKey,
+        peer_status: proto::PeerState,
+    ) -> bool {
+        let Ok(mut remote_states) = self.remote_states.write() else {
+            return false;
+        };
+        let state = remote_states.entry(peer).or_default();
+        if peer_status.revision < state.peer_revision {
+            return false;
+        }
+        state.peer_revision = peer_status.revision;
+        state.held = peer_status.held;
+        true
+    }
+
+    pub(super) fn remote_holds_any(&self, peer: PublicKey, devices: &[OutgoingDevice]) -> bool {
+        let Ok(states) = self.remote_states.read() else {
+            return false;
+        };
+        let Some(state) = states.get(&peer) else {
+            return false;
+        };
+        devices.iter().any(|device| {
+            state
+                .held
+                .iter()
+                .any(|held| same_device(held, &device.identity).unwrap_or(false))
+                || state.devices.iter().any(|view| {
+                    view.connected
+                        && view.identity.as_option().is_some_and(|identity| {
+                            same_device(identity, &device.identity).unwrap_or(false)
+                        })
+                })
+        })
     }
 
     async fn set_link_state(&self, peer: PublicKey, state: LinkState) {

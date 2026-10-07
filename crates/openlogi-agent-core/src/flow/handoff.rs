@@ -456,6 +456,25 @@ pub(super) async fn handle_notification(
         return;
     };
     match notification.kind {
+        FrameKind::AnnounceDevices => {
+            let Ok(announce) =
+                notification.decode::<proto::AnnounceDevices>(InboundRole::Notification)
+            else {
+                return;
+            };
+            if !state.update_remote_devices(peer, announce) {
+                debug!("stale Flow device announcement ignored");
+            }
+        }
+        FrameKind::PeerState => {
+            let Ok(peer_state) = notification.decode::<proto::PeerState>(InboundRole::Notification)
+            else {
+                return;
+            };
+            if !state.update_remote_state(peer, peer_state) {
+                debug!("stale Flow peer state ignored");
+            }
+        }
         FrameKind::HandoffResult => {
             let Ok(result) = notification.decode::<proto::HandoffResult>(InboundRole::Notification)
             else {
