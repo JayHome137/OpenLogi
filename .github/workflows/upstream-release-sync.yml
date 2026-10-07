@@ -1,0 +1,110 @@
+name: Sync upstream release
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-release-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Promote latest upstream release
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check sync token configuration
+        id: credentials
+        env:
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Sync skipped. Add repository secret UPSTREAM_SYNC_TOKEN with Contents: write, Pull requests: write, and Workflows: write permissions." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
+      - name: Check out master branch
+        if: steps.credentials.outputs.ready == 'true'
+        uses: actions/checkout@v7
+        with:
+          ref: master
+          fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+
+      - name: Find and fetch latest upstream release
+        if: steps.credentials.outputs.ready == 'true'
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="$(gh api repos/AprilNEA/OpenLogi/releases/latest --jq .tag_name)"
+          test -n "$tag"
+          git remote add upstream https://github.com/AprilNEA/OpenLogi.git
+          git fetch --no-tags upstream "refs/tags/$tag:refs/tags/$tag"
+          sha="$(git rev-parse "$tag^{commit}")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream latest release: $tag ($sha)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Merge latest release into master
+        if: steps.credentials.outputs.ready == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          RELEASE_SHA: ${{ steps.release.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin master
+          git fetch upstream --tags
+          git switch --force-create master origin/master
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git merge-base --is-ancestor "$RELEASE_SHA" HEAD; then
+            echo "master already contains release $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          previous_release="$(git tag --list 'v*' --merged HEAD --sort=-version:refname | head -n 1)"
+          if [ -n "$previous_release" ] && ! git merge-base --is-ancestor "$previous_release^{commit}" "$RELEASE_SHA"; then
+            echo "Latest release $RELEASE_TAG does not descend from $previous_release; stopped without changing master." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if ! git merge --no-edit --no-ff "$RELEASE_SHA"; then
+            conflicts="$(git diff --name-only --diff-filter=U || true)"
+            git merge --abort || true
+            {
+              echo "## Upstream release needs conflict review"
+              echo
+              echo "master was left unchanged because release $RELEASE_TAG conflicts with its current contents:"
+              echo
+              echo '```text'
+              echo "$conflicts"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          git push origin HEAD:refs/heads/master
+          echo "Merged upstream release $RELEASE_TAG into master while preserving the scheduled workflow." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or reuse custom sync PR
+        if: steps.credentials.outputs.ready == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --base openlogi-custom --head "$GITHUB_REPOSITORY_OWNER:master" --json number --jq '.[0].number // empty')"
+          if [ -n "$pr_number" ]; then
+            echo "Reused PR #$pr_number from master into openlogi-custom for release $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
+          else
+            body="$(printf '%s\n' '## Summary' '' "Merge upstream release $RELEASE_TAG from master into openlogi-custom." '' '## Testing' '' 'CI runs on this pull request.')"
+            pr_url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base openlogi-custom --head master --title "chore(upstream): sync release $RELEASE_TAG" --body "$body")"
+            echo "Created upstream sync PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+          fi
