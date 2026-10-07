@@ -23,6 +23,16 @@ jobs:
         with:
           ref: openlogi-custom
           fetch-depth: 0
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+
+      - name: Require a token that can update workflow files
+        env:
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
+            echo "Add repository secret UPSTREAM_SYNC_TOKEN with Contents: write and Workflows: write permissions." >&2
+            exit 1
+          fi
 
       - name: Find and fetch latest upstream release
         id: release
