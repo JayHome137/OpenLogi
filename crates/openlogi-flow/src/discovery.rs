@@ -16,6 +16,7 @@ use std::{
 };
 
 use mdns_sd::{ScopedIp, ServiceDaemon, ServiceEvent, ServiceInfo, TxtProperties};
+use openlogi_fixture::format_hex;
 use thiserror::Error;
 use tokio::task::{JoinHandle, JoinSet};
 
@@ -540,13 +541,7 @@ fn insert_discovered_service(
 }
 
 fn public_key_hex(public_key: PublicKey) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let mut encoded = String::with_capacity(64);
-    for byte in public_key.as_bytes() {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
+    format_hex(public_key.as_bytes())
 }
 
 fn parse_public_key_hex(encoded: &str) -> Result<PublicKey, DiscoveryError> {
