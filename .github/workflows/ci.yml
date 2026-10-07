@@ -6,7 +6,7 @@ name: CI
 
 on:
   push:
-    branches: [main, master]
+    branches: [main, master, openlogi-custom]
   pull_request:
 
 # Cancel superseded runs on the same ref (rapid PR pushes / force-pushes).
