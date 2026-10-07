@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  pull-requests: write
 
 concurrency:
   group: upstream-release-sync
@@ -25,18 +26,18 @@ jobs:
         run: |
           if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
             echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "Sync skipped. Add repository secret UPSTREAM_SYNC_TOKEN with Contents: write and Workflows: write permissions." >> "$GITHUB_STEP_SUMMARY"
+            echo "Sync skipped. Add repository secret UPSTREAM_SYNC_TOKEN with Contents: write, Pull requests: write, and Workflows: write permissions." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
           echo "ready=true" >> "$GITHUB_OUTPUT"
 
-      - name: Check out custom branch
+      - name: Check out master branch
         if: steps.credentials.outputs.ready == 'true'
         uses: actions/checkout@v7
         with:
-          ref: openlogi-custom
+          ref: master
           fetch-depth: 0
-          token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
+          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
       - name: Find and fetch latest upstream release
         if: steps.credentials.outputs.ready == 'true'
@@ -54,42 +55,34 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Upstream latest release: $tag ($sha)" >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Fast-forward master to the release tag
+      - name: Merge latest release into master
         if: steps.credentials.outputs.ready == 'true'
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
         run: |
           set -euo pipefail
-          git fetch origin master openlogi-custom
-          if ! git merge-base --is-ancestor origin/master "$RELEASE_SHA"; then
-            echo "Latest release $RELEASE_TAG is not a fast-forward from origin/master; stopped without rewriting master." >> "$GITHUB_STEP_SUMMARY"
-            exit 1
-          fi
-          if [ "$(git rev-parse origin/master)" != "$RELEASE_SHA" ]; then
-            git push origin "$RELEASE_SHA:refs/heads/master"
-            echo "Advanced master to $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
-          else
-            echo "master already points to $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
-          fi
-
-      - name: Merge master into custom
-        if: steps.credentials.outputs.ready == 'true'
-        env:
-          RELEASE_TAG: ${{ steps.release.outputs.tag }}
-        run: |
-          set -euo pipefail
-          git fetch origin master openlogi-custom
-          git switch --force-create openlogi-custom origin/openlogi-custom
+          git fetch origin master
+          git fetch upstream --tags
+          git switch --force-create master origin/master
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          if ! git merge --no-edit origin/master; then
+          if git merge-base --is-ancestor "$RELEASE_SHA" HEAD; then
+            echo "master already contains release $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          previous_release="$(git tag --list 'v*' --merged HEAD --sort=-version:refname | head -n 1)"
+          if [ -n "$previous_release" ] && ! git merge-base --is-ancestor "$previous_release^{commit}" "$RELEASE_SHA"; then
+            echo "Latest release $RELEASE_TAG does not descend from $previous_release; stopped without changing master." >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if ! git merge --no-edit --no-ff "$RELEASE_SHA"; then
             conflicts="$(git diff --name-only --diff-filter=U || true)"
             git merge --abort || true
             {
-              echo "## Upstream sync needs conflict review"
+              echo "## Upstream release needs conflict review"
               echo
-              echo "master was advanced to release $RELEASE_TAG. openlogi-custom was left unchanged because the merge has conflicts:"
+              echo "master was left unchanged because release $RELEASE_TAG conflicts with its current contents:"
               echo
               echo '```text'
               echo "$conflicts"
@@ -97,9 +90,21 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
             exit 1
           fi
-          if [ "$(git rev-parse HEAD)" != "$(git rev-parse origin/openlogi-custom)" ]; then
-            git push origin HEAD:refs/heads/openlogi-custom
-            echo "Merged master release $RELEASE_TAG into openlogi-custom." >> "$GITHUB_STEP_SUMMARY"
+          git push origin HEAD:refs/heads/master
+          echo "Merged upstream release $RELEASE_TAG into master while preserving the scheduled workflow." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or reuse custom sync PR
+        if: steps.credentials.outputs.ready == 'true'
+        env:
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          set -euo pipefail
+          pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --base openlogi-custom --head "$GITHUB_REPOSITORY_OWNER:master" --json number --jq '.[0].number // empty')"
+          if [ -n "$pr_number" ]; then
+            echo "Reused PR #$pr_number from master into openlogi-custom for release $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "openlogi-custom already contains master release $RELEASE_TAG." >> "$GITHUB_STEP_SUMMARY"
+            body="$(printf '%s\n' '## Summary' '' "Merge upstream release $RELEASE_TAG from master into openlogi-custom." '' '## Testing' '' 'CI runs on this pull request.')"
+            pr_url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base openlogi-custom --head master --title "chore(upstream): sync release $RELEASE_TAG" --body "$body")"
+            echo "Created upstream sync PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
           fi
