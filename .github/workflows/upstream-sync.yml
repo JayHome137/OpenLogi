@@ -19,28 +19,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - name: Check sync token configuration
-        id: credentials
-        env:
-          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
-        run: |
-          if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
-            echo "ready=false" >> "$GITHUB_OUTPUT"
-            echo "Sync skipped. Add repository secret UPSTREAM_SYNC_TOKEN with Contents: write, Pull requests: write, and Workflows: write permissions." >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          echo "ready=true" >> "$GITHUB_OUTPUT"
-
       - name: Check out master branch
-        if: steps.credentials.outputs.ready == 'true'
         uses: actions/checkout@v7
         with:
           ref: master
           fetch-depth: 0
-          token: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
 
       - name: Fetch latest upstream master commit
-        if: steps.credentials.outputs.ready == 'true'
         id: upstream
         run: |
           set -euo pipefail
@@ -51,7 +36,6 @@ jobs:
           echo "Upstream master: $sha" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Merge upstream master into fork master
-        if: steps.credentials.outputs.ready == 'true'
         env:
           UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
         run: |
@@ -82,10 +66,9 @@ jobs:
           echo "Merged upstream master commit $UPSTREAM_SHA into fork master while preserving the scheduled workflow." >> "$GITHUB_STEP_SUMMARY"
 
       - name: Create or reuse custom sync PR
-        if: steps.credentials.outputs.ready == 'true'
         env:
           UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
-          GH_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --base openlogi-custom --head "$GITHUB_REPOSITORY_OWNER:master" --json number --jq '.[0].number // empty')"
