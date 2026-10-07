@@ -18,23 +18,28 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - name: Check sync token configuration
+        id: credentials
+        env:
+          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+        run: |
+          if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
+            echo "ready=false" >> "$GITHUB_OUTPUT"
+            echo "Sync skipped. Add repository secret UPSTREAM_SYNC_TOKEN with Contents: write and Workflows: write permissions." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+
       - name: Check out custom branch
+        if: steps.credentials.outputs.ready == 'true'
         uses: actions/checkout@v7
         with:
           ref: openlogi-custom
           fetch-depth: 0
           token: ${{ secrets.UPSTREAM_SYNC_TOKEN || github.token }}
 
-      - name: Require a token that can update workflow files
-        env:
-          UPSTREAM_SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
-        run: |
-          if [ -z "$UPSTREAM_SYNC_TOKEN" ]; then
-            echo "Add repository secret UPSTREAM_SYNC_TOKEN with Contents: write and Workflows: write permissions." >&2
-            exit 1
-          fi
-
       - name: Find and fetch latest upstream release
+        if: steps.credentials.outputs.ready == 'true'
         id: release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -50,6 +55,7 @@ jobs:
           echo "Upstream latest release: $tag ($sha)" >> "$GITHUB_STEP_SUMMARY"
 
       - name: Fast-forward master to the release tag
+        if: steps.credentials.outputs.ready == 'true'
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
           RELEASE_SHA: ${{ steps.release.outputs.sha }}
@@ -68,6 +74,7 @@ jobs:
           fi
 
       - name: Merge master into custom
+        if: steps.credentials.outputs.ready == 'true'
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
         run: |
