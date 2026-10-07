@@ -40,6 +40,8 @@
 use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{DeviceRoute, FnLockState, LightCommand, WriteError};
+#[cfg(test)]
+use openlogi_ipc::FlowStatus;
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;
@@ -531,6 +533,7 @@ mod tests {
             camera_active,
             pairing: None,
             foreground: ForegroundApps::default(),
+            flow: FlowStatus::default(),
         }
     }
 
