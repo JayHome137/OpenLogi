@@ -1,0 +1,90 @@
+name: Sync upstream code
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-release-source-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Promote latest upstream release source
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out master branch
+        uses: actions/checkout@v7
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Fetch source commit for latest upstream release
+        id: upstream
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          git remote add upstream https://github.com/AprilNEA/OpenLogi.git
+          tag="$(gh api repos/AprilNEA/OpenLogi/releases/latest --jq .tag_name)"
+          test -n "$tag"
+          git fetch --no-tags upstream "refs/tags/$tag:refs/tags/$tag"
+          sha="$(git rev-parse "$tag^{commit}")"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Upstream latest release source: $tag ($sha)" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Merge release source into fork master
+        env:
+          RELEASE_TAG: ${{ steps.upstream.outputs.tag }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git fetch origin master
+          git switch --force-create master origin/master
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
+            echo "master already contains release source $RELEASE_TAG ($UPSTREAM_SHA)." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if ! git merge --no-edit --no-ff "$UPSTREAM_SHA"; then
+            conflicts="$(git diff --name-only --diff-filter=U || true)"
+            git merge --abort || true
+            {
+              echo "## Upstream release source needs conflict review"
+              echo
+              echo "master was left unchanged because release source $RELEASE_TAG ($UPSTREAM_SHA) conflicts with its current contents:"
+              echo
+              echo '```text'
+              echo "$conflicts"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          git push origin HEAD:refs/heads/master
+          echo "Merged upstream release source $RELEASE_TAG ($UPSTREAM_SHA) into fork master; no release assets were downloaded." >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create or reuse custom sync PR
+        env:
+          RELEASE_TAG: ${{ steps.upstream.outputs.tag }}
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          pr_number="$(gh pr list --repo "$GITHUB_REPOSITORY" --base openlogi-custom --head master --json number --jq '.[0].number // empty')"
+          if [ -n "$pr_number" ]; then
+            body="$(printf '%s\n' '## Summary' '' "Merge source code at upstream release tag $RELEASE_TAG ($UPSTREAM_SHA) from master into openlogi-custom." 'This uses the release tag as a code baseline and does not download release assets.' '' '## Testing' '' 'CI runs on this pull request.')"
+            gh pr edit "$pr_number" --repo "$GITHUB_REPOSITORY" --title "chore(upstream): sync release $RELEASE_TAG source" --body "$body"
+            echo "Reused PR #$pr_number from master into openlogi-custom for release source $RELEASE_TAG ($UPSTREAM_SHA)." >> "$GITHUB_STEP_SUMMARY"
+          else
+            body="$(printf '%s\n' '## Summary' '' "Merge source code at upstream release tag $RELEASE_TAG ($UPSTREAM_SHA) from master into openlogi-custom." 'This uses the release tag as a code baseline and does not download release assets.' '' '## Testing' '' 'CI runs on this pull request.')"
+            pr_url="$(gh pr create --repo "$GITHUB_REPOSITORY" --base openlogi-custom --head master --title "chore(upstream): sync release $RELEASE_TAG source" --body "$body")"
+            echo "Created upstream release-source sync PR: $pr_url" >> "$GITHUB_STEP_SUMMARY"
+          fi

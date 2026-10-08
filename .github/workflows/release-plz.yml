@@ -17,6 +17,7 @@ env:
 jobs:
   release-pr:
     name: release-plz PR
+    if: github.repository == 'AprilNEA/OpenLogi'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -159,8 +160,9 @@ jobs:
   release:
     name: release-plz release
     if: >-
-      github.event_name == 'workflow_dispatch' ||
-      startsWith(github.event.head_commit.message, 'chore: release')
+      github.repository == 'AprilNEA/OpenLogi' &&
+      (github.event_name == 'workflow_dispatch' ||
+       startsWith(github.event.head_commit.message, 'chore: release'))
     runs-on: ubuntu-latest
     permissions:
       contents: write
