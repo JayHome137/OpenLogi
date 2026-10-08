@@ -40,6 +40,22 @@ If you use [direnv](https://direnv.net) without devenv installed, `.envrc`
 prints a notice and leaves your shell alone. Install rustup/cargo yourself
 and keep working.
 
+### Isolated test stages
+
+For local verification that should be cleaned automatically, use the project
+wrapper instead of calling Cargo directly:
+
+```sh
+scripts/openlogi-test-stage --stage flow-unit -- \
+  cargo test -p openlogi-agent-core flow
+```
+
+Each invocation gets a unique directory under `.stage/runs/` and a private
+`CARGO_TARGET_DIR`. The success marker lives in that same run directory, so
+delayed cleanup jobs cannot share or invalidate one another. Failed or
+interrupted commands are not registered as successful stages. `.stage/` is
+ignored by Git and contains only reproducible test output.
+
 ### With devenv (optional)
 
 `devenv.nix` provisions sccache, protoc, the stable Rust toolchain, platform libraries,

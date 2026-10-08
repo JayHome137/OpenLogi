@@ -9,6 +9,7 @@ devenv.local.yaml
 # Added by cargo
 
 /target
+/.stage/
 
 # Local reference clone of external-reference — studied for architecture,
 # never copied or vendored. Cloned at the project root for convenience.

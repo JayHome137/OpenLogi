@@ -1,0 +1,73 @@
+#!/bin/sh
+set -eu
+
+project_root=$(cd -- "$(dirname -- "$0")/.." && pwd)
+stage=''
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --stage)
+      [ "$#" -ge 2 ] || {
+        echo 'missing value for --stage' >&2
+        exit 2
+      }
+      stage=$2
+      shift 2
+      ;;
+    --)
+      shift
+      break
+      ;;
+    *)
+      echo "unknown option: $1" >&2
+      exit 2
+      ;;
+  esac
+done
+
+[ -n "$stage" ] || {
+  echo 'usage: openlogi-test-stage --stage NAME -- COMMAND [ARGS...]' >&2
+  exit 2
+}
+[ "$#" -gt 0 ] || {
+  echo 'missing command' >&2
+  exit 2
+}
+case "$stage" in
+  *[!A-Za-z0-9._-]*)
+    echo 'stage contains unsupported characters' >&2
+    exit 2
+    ;;
+esac
+
+runs_root="$project_root/.stage/runs"
+mkdir -p "$runs_root"
+run_root=$(mktemp -d "$runs_root/${stage}.XXXXXX")
+target_dir="$run_root/build"
+success_dir="$run_root/.stage-success"
+success_path="$success_dir/$stage.success"
+mkdir -p "$success_dir"
+
+cleanup_on_signal() {
+  rm -f "$success_path"
+  exit 130
+}
+trap cleanup_on_signal INT TERM HUP
+
+set +e
+env CARGO_TARGET_DIR="$target_dir" "$@"
+status=$?
+set -e
+
+if [ "$status" -ne 0 ]; then
+  rm -f "$success_path"
+  exit "$status"
+fi
+
+touch "$success_path"
+/Users/jayboy137/.codex/project-stage-cleanup/bin/project-stage-hook success \
+  --project "$project_root" \
+  --stage "$stage" \
+  --generated-root "$run_root" \
+  --success-path "$success_path"
+echo "OpenLogi test stage recorded: $run_root"
