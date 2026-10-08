@@ -467,6 +467,34 @@ async fn fixture_mode_does_not_start_wall_clock_pairing_tasks() {
     ));
 }
 
+#[tokio::test]
+async fn flow_rpcs_expose_deterministic_mock_boundaries() {
+    let agent = MockAgent::new(test_state());
+    agent
+        .clone()
+        .flow_set_enabled(tarpc::context::current(), true)
+        .await
+        .expect("mock Flow enable should succeed");
+    assert!(matches!(
+        agent
+            .clone()
+            .flow_pair_start(tarpc::context::current(), "desk.local:59869".to_owned())
+            .await,
+        Err(FlowCommandError::Invalid { message }) if message.contains("unavailable")
+    ));
+    assert!(matches!(
+        agent
+            .clone()
+            .flow_pair_confirm(tarpc::context::current())
+            .await,
+        Err(FlowCommandError::NoActiveSession)
+    ));
+    assert!(matches!(
+        agent.flow_pair_cancel(tarpc::context::current()).await,
+        Err(FlowCommandError::NoActiveSession)
+    ));
+}
+
 #[test]
 fn cancel_and_device_selection_are_atomic_in_either_order() {
     let mut cancel_first = state_with_discovery();

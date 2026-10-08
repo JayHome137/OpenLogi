@@ -113,6 +113,11 @@ kinds/fields skipped) is the safety net, gating is the contract.
 Trust ceremony (design doc §Transport chose pinned keys; this is how pins
 are created). Runs on an untrusted session:
 
+The receiving machine first opens a bounded inbound pairing window with
+`openlogi flow listen`; the initiating machine then uses
+`openlogi flow pair-start <address>`. Both users compare the displayed code and
+run `openlogi flow confirm` on their own machine.
+
 ```
 A                                   B
 │ ──── PairStart ────────────────► │  B shows prompt: name, code, fingerprint

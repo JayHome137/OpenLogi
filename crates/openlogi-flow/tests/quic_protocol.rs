@@ -24,7 +24,7 @@ use openlogi_flow::{
 type TestResult<T = ()> = Result<T, Box<dyn StdError + Send + Sync>>;
 
 struct ConnectedPair {
-    _first_endpoint: Arc<FlowEndpoint>,
+    first_endpoint: Arc<FlowEndpoint>,
     _second_endpoint: Arc<FlowEndpoint>,
     first: FlowConnection,
     second: FlowConnection,
@@ -78,7 +78,7 @@ impl ConnectedPair {
         let first_connection = first.connect(second.local_addr()?).await?;
         let second_connection = accept.await??;
         Ok(Self {
-            _first_endpoint: first,
+            first_endpoint: first,
             _second_endpoint: second,
             first: first_connection,
             second: second_connection,
@@ -99,6 +99,7 @@ impl PeerKeyStore for MemoryKeyStore {
 #[tokio::test]
 async fn hello_negotiates_over_mutually_pinned_quic() -> TestResult {
     let pair = ConnectedPair::trusted((1, 3), (2, 4)).await?;
+    assert_eq!(pair.second.remote_addr(), pair.first_endpoint.local_addr()?);
     assert_eq!(pair.first.negotiated().version, 3);
     assert_eq!(pair.second.negotiated().version, 3);
     assert_eq!(pair.first.trust(), SessionTrust::Trusted);

@@ -2,15 +2,19 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
-use openlogi_flow::frame::{FrameKind, InboundRole};
+use openlogi_flow::frame::{FrameKind, InboundRole, MAX_CHUNK_LEN};
 use openlogi_flow::generated as proto;
 use openlogi_flow::identity::same_device;
 use openlogi_flow::sas::PublicKey;
-use openlogi_flow::transport::{IncomingRpc, NotificationEvent, RpcEvent, message_envelope};
+use openlogi_flow::transport::{
+    BulkRpcResponse, IncomingRpc, NotificationEvent, RpcEvent, error_envelope, message_envelope,
+};
+use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::Instant;
 use tracing::debug;
 
+use super::clipboard::{MAX_CLIPBOARD_BYTES, MAX_FILE_LIST_BYTES};
 use super::runtime::GenerationState;
 use super::{RuntimeDevice, is_pointing_device};
 
@@ -316,12 +320,62 @@ impl HandoffBook {
         let _ = waiter.result.send(OutgoingSignal::Cancelled);
         true
     }
+
+    /// Drops all in-flight transfers owned by a disconnected peer and wakes
+    /// outgoing waiters so a stale connection cannot block the next crossing.
+    pub(super) async fn forget_peer(&self, peer: PublicKey) {
+        {
+            let mut incoming = self.incoming.lock().await;
+            if incoming
+                .pending
+                .as_ref()
+                .is_some_and(|pending| pending.peer == peer)
+            {
+                incoming.pending = None;
+            }
+            incoming
+                .completed
+                .retain(|(candidate, _), _| *candidate != peer);
+            incoming
+                .completion_order
+                .retain(|(candidate, _)| *candidate != peer);
+        }
+        let mut outgoing = self.outgoing.lock().await;
+        let current = std::mem::take(&mut *outgoing);
+        for (transfer_id, waiter) in current {
+            if waiter.peer == peer {
+                let _ = waiter.result.send(OutgoingSignal::Cancelled);
+            } else {
+                outgoing.insert(transfer_id, waiter);
+            }
+        }
+    }
 }
 
 pub(super) async fn handle_rpc(state: Arc<GenerationState>, peer: PublicKey, event: RpcEvent) {
     let RpcEvent::Request(rpc) = event else {
         return;
     };
+    if rpc.request().kind == FrameKind::ClipboardFetch {
+        let Ok(request) = rpc
+            .request()
+            .decode::<proto::ClipboardFetch>(InboundRole::Request)
+        else {
+            return;
+        };
+        respond_clipboard_fetch(state, rpc, request).await;
+        return;
+    }
+    if rpc.request().kind == FrameKind::FileFetch {
+        let Ok(request) = rpc
+            .request()
+            .decode::<proto::FileFetch>(InboundRole::Request)
+        else {
+            return;
+        };
+        respond_file_fetch(state, rpc, request).await;
+        return;
+    }
     if rpc.request().kind != FrameKind::HandoffRequest {
         return;
     }
@@ -345,6 +399,133 @@ pub(super) async fn handle_rpc(state: Arc<GenerationState>, peer: PublicKey, eve
         )
         .await;
     respond_to_arm(state, peer, rpc, decision).await;
+}
+
+async fn respond_clipboard_fetch(
+    state: Arc<GenerationState>,
+    rpc: IncomingRpc,
+    request: proto::ClipboardFetch,
+) {
+    let fetched = if request.mime == super::clipboard::FILES_MIME {
+        state
+            .clipboard
+            .fetch_file_list(request.sequence, request.offset)
+            .await
+    } else {
+        state
+            .clipboard
+            .fetch(request.sequence, &request.mime, request.offset)
+            .await
+            .map(|(local, bytes)| (local.sequence, local.bytes.len() as u64, bytes))
+    };
+    let Ok((sequence, total_size, bytes)) = fetched else {
+        if let Ok(error) = error_envelope(
+            proto::ErrorCode::Invalid,
+            "clipboard sequence, MIME, or offset is invalid",
+        ) {
+            let _ = rpc.respond(error).await;
+        }
+        return;
+    };
+    let Ok(head) = message_envelope(
+        FrameKind::ClipboardData,
+        &proto::ClipboardData {
+            sequence,
+            mime: request.mime,
+            total_size,
+            ..Default::default()
+        },
+    ) else {
+        respond_clipboard_error(rpc, "could not encode clipboard response").await;
+        return;
+    };
+    let mut chunks = Vec::with_capacity(bytes.len().div_ceil(MAX_CHUNK_LEN));
+    for chunk in bytes.chunks(MAX_CHUNK_LEN) {
+        let Ok(frame) = message_envelope(
+            FrameKind::Chunk,
+            &proto::Chunk {
+                data: chunk.to_vec(),
+                ..Default::default()
+            },
+        ) else {
+            respond_clipboard_error(rpc, "could not encode clipboard chunk").await;
+            return;
+        };
+        chunks.push(frame);
+    }
+    let checksum: [u8; 32] = Sha256::digest(&bytes).into();
+    let Ok(end) = message_envelope(
+        FrameKind::ChunkEnd,
+        &proto::ChunkEnd {
+            sha256: Some(checksum.to_vec()),
+            ..Default::default()
+        },
+    ) else {
+        respond_clipboard_error(rpc, "could not encode clipboard terminator").await;
+        return;
+    };
+    let _ = rpc.respond_bulk(head, chunks, end).await;
+}
+
+async fn respond_file_fetch(
+    state: Arc<GenerationState>,
+    rpc: IncomingRpc,
+    request: proto::FileFetch,
+) {
+    let fetched = state
+        .clipboard
+        .fetch_file(request.sequence, request.file_index, request.offset)
+        .await;
+    let Ok((sequence, total_size, bytes)) = fetched else {
+        if let Ok(error) = error_envelope(
+            proto::ErrorCode::Invalid,
+            "file generation or index is invalid",
+        ) {
+            let _ = rpc.respond(error).await;
+        }
+        return;
+    };
+    let head = proto::ClipboardData {
+        sequence,
+        mime: "application/octet-stream".to_owned(),
+        total_size,
+        ..Default::default()
+    };
+    let Ok(head) = message_envelope(FrameKind::ClipboardData, &head) else {
+        return;
+    };
+    let chunks = bytes
+        .chunks(MAX_CHUNK_LEN)
+        .map(|chunk| {
+            message_envelope(
+                FrameKind::Chunk,
+                &proto::Chunk {
+                    data: chunk.to_vec(),
+                    ..Default::default()
+                },
+            )
+        })
+        .collect::<Result<Vec<_>, _>>();
+    let Ok(chunks) = chunks else {
+        return;
+    };
+    let checksum: [u8; 32] = Sha256::digest(&bytes).into();
+    let Ok(end) = message_envelope(
+        FrameKind::ChunkEnd,
+        &proto::ChunkEnd {
+            sha256: Some(checksum.to_vec()),
+            ..Default::default()
+        },
+    ) else {
+        return;
+    };
+    let _ = rpc.respond_bulk(head, chunks, end).await;
+}
+
+async fn respond_clipboard_error(rpc: IncomingRpc, detail: &str) {
+    if let Ok(error) = error_envelope(proto::ErrorCode::Internal, detail) {
+        let _ = rpc.respond(error).await;
+    }
 }
 
 async fn respond_to_arm(
@@ -507,8 +688,257 @@ pub(super) async fn handle_notification(
                 );
             }
         }
+        FrameKind::ClipboardAnnounce => {
+            let Ok(announce) =
+                notification.decode::<proto::ClipboardAnnounce>(InboundRole::Notification)
+            else {
+                return;
+            };
+            // Prefetch into the Flow clipboard cache, but do not touch the host
+            // clipboard until the input hook observes Cmd/Ctrl+V.
+            if let Some((sequence, mime)) = state.clipboard.accept_announce(peer, &announce).await {
+                let fetch_state = Arc::clone(&state);
+                tokio::spawn(async move {
+                    fetch_remote_clipboard(fetch_state, peer, sequence, mime, 0).await;
+                });
+            }
+        }
         _ => {}
     }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "clipboard and file-list fetch share one validated transfer lifecycle"
+)]
+pub(super) async fn fetch_remote_clipboard(
+    state: Arc<GenerationState>,
+    peer: PublicKey,
+    sequence: u64,
+    mime: String,
+    offset: u64,
+) {
+    let Some(connection) = state.connection(peer) else {
+        return;
+    };
+    let Ok(request) = message_envelope(
+        FrameKind::ClipboardFetch,
+        &proto::ClipboardFetch {
+            sequence,
+            mime: mime.clone(),
+            offset,
+            ..Default::default()
+        },
+    ) else {
+        return;
+    };
+    let Ok(response) = connection.call_bulk(request).await else {
+        return;
+    };
+    let BulkRpcResponse::Data(response) = response else {
+        return;
+    };
+    if mime == super::clipboard::TEXT_MIME {
+        let Some((total_size, bytes, checksum)) =
+            read_text_bulk_response(state.as_ref(), response, peer, sequence, offset).await
+        else {
+            return;
+        };
+        if total_size <= MAX_CLIPBOARD_BYTES as u64 {
+            let _ = state
+                .clipboard
+                .apply_remote(peer, sequence, offset, bytes, checksum)
+                .await;
+        }
+        return;
+    }
+    let max_size = if mime == super::clipboard::FILES_MIME {
+        MAX_FILE_LIST_BYTES
+    } else {
+        return;
+    };
+    let Some((total_size, bytes, checksum)) =
+        read_bulk_response(response, sequence, &mime, offset, max_size).await
+    else {
+        return;
+    };
+    if mime != super::clipboard::FILES_MIME || offset != 0 {
+        return;
+    }
+    if total_size > MAX_FILE_LIST_BYTES as u64 {
+        return;
+    }
+    let Ok(entries) = state
+        .clipboard
+        .validate_remote_file_list(peer, sequence, &bytes, checksum)
+        .await
+    else {
+        return;
+    };
+    let mut files = Vec::with_capacity(entries.len());
+    for (index, entry) in entries.iter().enumerate() {
+        let Ok(request) = message_envelope(
+            FrameKind::FileFetch,
+            &proto::FileFetch {
+                sequence,
+                file_index: u32::try_from(index).unwrap_or(u32::MAX),
+                offset: 0,
+                ..Default::default()
+            },
+        ) else {
+            return;
+        };
+        let Ok(BulkRpcResponse::Data(response)) = connection.call_bulk(request).await else {
+            return;
+        };
+        let Some((total_size, bytes, checksum)) = read_bulk_response(
+            response,
+            sequence,
+            "application/octet-stream",
+            0,
+            usize::try_from(entry.size_bytes).unwrap_or(usize::MAX),
+        )
+        .await
+        else {
+            return;
+        };
+        let file_hash: [u8; 32] = Sha256::digest(&bytes).into();
+        if total_size != entry.size_bytes
+            || bytes.len() as u64 != entry.size_bytes
+            || checksum.is_some_and(|expected| expected != file_hash)
+        {
+            return;
+        }
+        files.push((entry.relative_path.clone(), bytes));
+    }
+    let identity_digest = super::clipboard::file_identity_digest(&proto::FileList {
+        files: entries,
+        ..Default::default()
+    });
+    let _ = state
+        .clipboard
+        .apply_remote_files(peer, sequence, files, identity_digest)
+        .await;
+}
+
+async fn read_text_bulk_response(
+    state: &GenerationState,
+    mut response: openlogi_flow::transport::BulkResponse,
+    peer: PublicKey,
+    sequence: u64,
+    offset: u64,
+) -> Option<(u64, Vec<u8>, Option<[u8; 32]>)> {
+    let head = response
+        .head()
+        .decode::<proto::ClipboardData>(InboundRole::Notification)
+        .ok()?;
+    if head.sequence != sequence || head.mime != super::clipboard::TEXT_MIME {
+        return None;
+    }
+    let total_size = head.total_size;
+    let total_size_usize = usize::try_from(total_size).ok()?;
+    if total_size_usize > MAX_CLIPBOARD_BYTES {
+        return None;
+    }
+    let offset = usize::try_from(offset).ok()?;
+    if offset > total_size_usize {
+        return None;
+    }
+    let expected_size = total_size_usize - offset;
+    let mut bytes = Vec::with_capacity(expected_size);
+    let checksum = loop {
+        let Ok(Some(frame)) = response.next_frame().await else {
+            return None;
+        };
+        match frame.kind {
+            FrameKind::Chunk => {
+                let chunk = frame
+                    .decode::<proto::Chunk>(InboundRole::Notification)
+                    .ok()?;
+                if chunk.data.len() > MAX_CHUNK_LEN
+                    || bytes.len().saturating_add(chunk.data.len()) > expected_size
+                {
+                    return None;
+                }
+                let chunk_offset = u64::try_from(offset + bytes.len()).ok()?;
+                state
+                    .clipboard
+                    .apply_remote_chunk(peer, sequence, chunk_offset, &chunk.data)
+                    .await
+                    .ok()?;
+                bytes.extend_from_slice(&chunk.data);
+            }
+            FrameKind::ChunkEnd => {
+                let end = frame
+                    .decode::<proto::ChunkEnd>(InboundRole::Notification)
+                    .ok()?;
+                let checksum = match end.sha256.as_deref() {
+                    None => None,
+                    Some(value) => Some(<[u8; 32]>::try_from(value).ok()?),
+                };
+                break checksum;
+            }
+            _ => return None,
+        }
+    };
+    (bytes.len() == expected_size).then_some((total_size, bytes, checksum))
+}
+
+async fn read_bulk_response(
+    mut response: openlogi_flow::transport::BulkResponse,
+    sequence: u64,
+    mime: &str,
+    offset: u64,
+    max_size: usize,
+) -> Option<(u64, Vec<u8>, Option<[u8; 32]>)> {
+    let head = response
+        .head()
+        .decode::<proto::ClipboardData>(InboundRole::Notification)
+        .ok()?;
+    if head.sequence != sequence || head.mime != mime {
+        return None;
+    }
+    let total_size = head.total_size;
+    let total_size_usize = usize::try_from(total_size).ok()?;
+    if total_size_usize > max_size {
+        return None;
+    }
+    let offset = usize::try_from(offset).ok()?;
+    if offset > total_size_usize {
+        return None;
+    }
+    let expected_size = total_size_usize - offset;
+    let mut bytes = Vec::with_capacity(expected_size);
+    let checksum = loop {
+        let Ok(Some(frame)) = response.next_frame().await else {
+            return None;
+        };
+        match frame.kind {
+            FrameKind::Chunk => {
+                let chunk = frame
+                    .decode::<proto::Chunk>(InboundRole::Notification)
+                    .ok()?;
+                if chunk.data.len() > MAX_CHUNK_LEN
+                    || bytes.len().saturating_add(chunk.data.len()) > expected_size
+                {
+                    return None;
+                }
+                bytes.extend_from_slice(&chunk.data);
+            }
+            FrameKind::ChunkEnd => {
+                let end = frame
+                    .decode::<proto::ChunkEnd>(InboundRole::Notification)
+                    .ok()?;
+                let checksum = match end.sha256.as_deref() {
+                    None => None,
+                    Some(value) => Some(<[u8; 32]>::try_from(value).ok()?),
+                };
+                break checksum;
+            }
+            _ => return None,
+        }
+    };
+    (bytes.len() == expected_size).then_some((total_size, bytes, checksum))
 }
 
 struct CompletedTransfer {

@@ -521,13 +521,18 @@ pub fn start(
         // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
         // button. The active set pairs key-up even if modifier state or config
         // changes while the key is down.
-        HookEvent::Key(event) => handle_key(
-            event,
-            &keyboard_bindings,
-            &action_tx,
-            &dispatcher,
-            ActionDispatchTarget::capture,
-        ),
+        HookEvent::Key(event) => {
+            if is_paste_shortcut(event) {
+                flow.try_paste();
+            }
+            handle_key(
+                event,
+                &keyboard_bindings,
+                &action_tx,
+                &dispatcher,
+                ActionDispatchTarget::capture,
+            )
+        }
     });
 
     match result {
@@ -540,6 +545,14 @@ pub fn start(
             None
         }
     }
+}
+
+const PASTE_KEYCODE: u16 = 0x09;
+
+fn is_paste_shortcut(event: KeyEvent) -> bool {
+    event.pressed
+        && event.keycode == PASTE_KEYCODE
+        && (event.modifiers.command || event.modifiers.control)
 }
 
 /// Resolve a native horizontal-wheel tick to a rebound thumb-wheel action.

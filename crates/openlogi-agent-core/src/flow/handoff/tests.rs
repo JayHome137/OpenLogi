@@ -202,3 +202,38 @@ async fn response_failure_cannot_disarm_accepted_transfer_but_cancel_can() {
         ArmDecision::New(_)
     ));
 }
+
+#[tokio::test]
+async fn disconnect_clears_pending_transfer_and_wakes_sender() {
+    let book = HandoffBook::default();
+    let peer = PublicKey::new([8; 32]);
+    let devices = vec![device("mouse", 1, false)];
+    assert!(matches!(
+        book.arm(peer, &request(12, &devices), &devices, true).await,
+        ArmDecision::New(_)
+    ));
+    let receiver = book.register_outgoing(peer, 13).await;
+
+    book.forget_peer(peer).await;
+
+    assert!(!book.has_accepted_incoming().await);
+    assert!(matches!(receiver.await, Ok(OutgoingSignal::Cancelled)));
+}
+
+#[tokio::test]
+async fn disconnect_drops_completed_replay_for_the_old_session() {
+    let book = HandoffBook::default();
+    let peer = PublicKey::new([9; 32]);
+    let devices = vec![device("mouse", 1, false)];
+    assert!(matches!(
+        book.arm(peer, &request(14, &devices), &devices, true).await,
+        ArmDecision::New(_)
+    ));
+    assert!(book.mark_accepted(peer, 14).await);
+    let _ = book.observe(&[device("mouse", 1, true)]).await;
+    assert!(book.has_completed_incoming().await);
+
+    book.forget_peer(peer).await;
+
+    assert!(!book.has_completed_incoming().await);
+}

@@ -2,20 +2,21 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 
-use openlogi_core::config::FlowConfig;
+use openlogi_core::config::{Config, FlowConfig};
 use openlogi_hid::ChannelPool;
 use openlogi_hook::CursorSample;
 use openlogi_hook::edge::{
     ArmedSides, EdgeCrossing, EdgeDetector, EdgeDetectorParams, ExposedEdges,
 };
-use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
-use tokio::sync::mpsc;
+use openlogi_ipc::{FlowCommandError, FlowLinkState, FlowPeerStatus, FlowStatus};
+use tokio::sync::{mpsc, oneshot};
 use tracing::warn;
 
 use super::FlowGeneration;
 use crate::flow::FlowDeviceSnapshot;
+use crate::flow::clipboard::{ClipboardManager, default_backend};
 use crate::flow::config::CompiledFlowConfig;
-use crate::flow::handoff::start_outgoing;
+use crate::flow::handoff::{fetch_remote_clipboard, start_outgoing};
 use crate::observable::ObservableState;
 use crate::receiver_access::ReceiverAccess;
 
@@ -39,6 +40,7 @@ struct ControllerInner {
     edge_settings: Arc<RwLock<EdgeSettings>>,
     channel_pool: ChannelPool,
     receiver_access: ReceiverAccess,
+    clipboard: Arc<ClipboardManager>,
     armed: AtomicBool,
 }
 
@@ -46,6 +48,8 @@ struct ControllerInner {
 #[derive(Clone)]
 pub struct FlowInputHandle {
     movement: mpsc::Sender<Movement>,
+    control: mpsc::UnboundedSender<Control>,
+    clipboard: Arc<ClipboardManager>,
 }
 
 #[derive(Clone, Copy)]
@@ -53,10 +57,28 @@ struct Movement {
     cursor: CursorSample,
 }
 
-enum Control {
+pub(super) enum Control {
     Reconfigure(FlowConfig),
     Devices(Vec<FlowDeviceSnapshot>),
     Crossing(EdgeCrossing),
+    PairCompleted,
+    PairStart {
+        address: String,
+        reply: oneshot::Sender<Result<(), FlowCommandError>>,
+    },
+    PairListen {
+        reply: oneshot::Sender<Result<(), FlowCommandError>>,
+    },
+    PairConfirm {
+        reply: oneshot::Sender<Result<(), FlowCommandError>>,
+    },
+    PairReject {
+        reply: oneshot::Sender<Result<(), FlowCommandError>>,
+    },
+    PairCancel {
+        reply: oneshot::Sender<Result<(), FlowCommandError>>,
+    },
+    Paste,
 }
 
 #[derive(Clone)]
@@ -78,6 +100,7 @@ impl FlowController {
         let (control_tx, control_rx) = mpsc::unbounded_channel();
         let (movement_tx, movement_rx) = mpsc::channel(CONTROL_QUEUE);
         let edge_settings = edge_settings(&config, 0);
+        let clipboard = Arc::new(ClipboardManager::new(default_backend()));
         observable.set_flow(status_from_config(&config));
         Self {
             inner: Arc::new(ControllerInner {
@@ -91,6 +114,7 @@ impl FlowController {
                 edge_settings: Arc::new(RwLock::new(edge_settings)),
                 channel_pool,
                 receiver_access,
+                clipboard,
                 armed: AtomicBool::new(false),
             }),
         }
@@ -115,6 +139,10 @@ impl FlowController {
             .and_then(|mut receiver| receiver.take());
         let (Some(control), Some(movement)) = (control, movement) else {
             warn!("Flow controller channels unavailable — Flow remains disabled");
+            // A failed channel handoff must not leave the controller looking
+            // armed. This is observable by pairing/config callers and would
+            // otherwise prevent a later lifecycle re-arm from retrying.
+            self.inner.armed.store(false, Ordering::Release);
             return;
         };
         let config = self
@@ -165,6 +193,13 @@ impl FlowController {
         self.inner.observable.set_flow(status_from_config(config));
     }
 
+    /// Validates a candidate Flow configuration without starting networking.
+    pub fn validate_config(config: &FlowConfig) -> Result<(), String> {
+        CompiledFlowConfig::compile(config)
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+    }
+
     /// Publish a fresh inventory-derived Flow device snapshot.
     pub(crate) fn update_devices(&self, devices: Vec<FlowDeviceSnapshot>) {
         if let Ok(mut current) = self.inner.devices.write() {
@@ -180,6 +215,8 @@ impl FlowController {
     pub fn input(&self) -> FlowInputHandle {
         FlowInputHandle {
             movement: self.inner.movement_tx.clone(),
+            control: self.inner.control_tx.clone(),
+            clipboard: Arc::clone(&self.inner.clipboard),
         }
     }
 
@@ -187,12 +224,70 @@ impl FlowController {
     pub fn crossing(&self, crossing: EdgeCrossing) {
         let _ = self.inner.control_tx.send(Control::Crossing(crossing));
     }
+
+    /// Begin a cross-machine Flow pairing ceremony.
+    pub async fn pair_start(&self, address: String) -> Result<(), FlowCommandError> {
+        let (reply, result) = oneshot::channel();
+        self.send_pairing_command(Control::PairStart { address, reply }, result)
+            .await
+    }
+
+    /// Confirm the currently displayed Flow pairing code.
+    pub async fn pair_confirm(&self) -> Result<(), FlowCommandError> {
+        let (reply, result) = oneshot::channel();
+        self.send_pairing_command(Control::PairConfirm { reply }, result)
+            .await
+    }
+
+    /// Open a one-shot inbound Flow pairing window for an unknown peer.
+    pub async fn pair_listen(&self) -> Result<(), FlowCommandError> {
+        let (reply, result) = oneshot::channel();
+        self.send_pairing_command(Control::PairListen { reply }, result)
+            .await
+    }
+
+    /// Reject the currently displayed Flow pairing code.
+    pub async fn pair_reject(&self) -> Result<(), FlowCommandError> {
+        let (reply, result) = oneshot::channel();
+        self.send_pairing_command(Control::PairReject { reply }, result)
+            .await
+    }
+
+    /// Cancel the currently active Flow pairing ceremony.
+    pub async fn pair_cancel(&self) -> Result<(), FlowCommandError> {
+        let (reply, result) = oneshot::channel();
+        self.send_pairing_command(Control::PairCancel { reply }, result)
+            .await
+    }
+
+    async fn send_pairing_command(
+        &self,
+        command: Control,
+        result: oneshot::Receiver<Result<(), FlowCommandError>>,
+    ) -> Result<(), FlowCommandError> {
+        if !self.inner.armed.load(Ordering::Acquire) {
+            return Err(FlowCommandError::Unavailable);
+        }
+        self.inner
+            .control_tx
+            .send(command)
+            .map_err(|_| FlowCommandError::Unavailable)?;
+        result.await.unwrap_or(Err(FlowCommandError::Unavailable))
+    }
 }
 
 impl FlowInputHandle {
     /// Queue one pointer movement without blocking the OS hook callback.
     pub fn try_moved(&self, cursor: CursorSample) {
         let _ = self.movement.try_send(Movement { cursor });
+    }
+
+    /// Notify the Flow runtime that the local user invoked paste. The runtime
+    /// then pulls one pending remote clipboard generation, if available.
+    pub fn try_paste(&self) {
+        if !self.clipboard.apply_staged() {
+            let _ = self.control.send(Control::Paste);
+        }
     }
 }
 
@@ -209,6 +304,7 @@ fn status_from_config(config: &FlowConfig) -> FlowStatus {
                     state: FlowLinkState::Lost,
                 })
                 .collect(),
+            pairing: None,
         },
         |compiled| compiled.status(),
     )
@@ -253,6 +349,69 @@ async fn run_controller(
                     start_outgoing(Arc::clone(&active.state), crossing);
                 }
             }
+            Control::PairCompleted => {
+                let next = match Config::load_or_default() {
+                    Ok(config) => config,
+                    Err(error) => {
+                        warn!(%error, "Flow pairing completed but config reload failed");
+                        continue;
+                    }
+                };
+                if let Some(active) = generation.take() {
+                    active.shutdown().await;
+                }
+                if let Ok(mut current) = inner.config.write() {
+                    *current = next.flow.clone();
+                }
+                generation = start_generation(&inner, &next.flow, &devices).await;
+            }
+            Control::PairStart { address, reply } => {
+                let result = match generation.as_ref() {
+                    Some(active) => active.pair_start(address).await,
+                    None => Err(FlowCommandError::Unavailable),
+                };
+                let _ = reply.send(result);
+            }
+            Control::PairConfirm { reply } => {
+                let result = match generation.as_ref() {
+                    Some(active) => active.pair_confirm().await,
+                    None => Err(FlowCommandError::Unavailable),
+                };
+                let _ = reply.send(result);
+            }
+            Control::PairListen { reply } => {
+                let result = match generation.as_ref() {
+                    Some(active) => active.pair_listen().await,
+                    None => Err(FlowCommandError::Unavailable),
+                };
+                let _ = reply.send(result);
+            }
+            Control::PairReject { reply } => {
+                let result = match generation.as_ref() {
+                    Some(active) => active.pair_reject().await,
+                    None => Err(FlowCommandError::Unavailable),
+                };
+                let _ = reply.send(result);
+            }
+            Control::PairCancel { reply } => {
+                let result = match generation.as_ref() {
+                    Some(active) => active.pair_cancel().await,
+                    None => Err(FlowCommandError::Unavailable),
+                };
+                let _ = reply.send(result);
+            }
+            Control::Paste => {
+                let Some(active) = &generation else {
+                    continue;
+                };
+                let Some((peer, sequence, mime, offset)) =
+                    active.state.clipboard.pending_fetch().await
+                else {
+                    continue;
+                };
+                fetch_remote_clipboard(Arc::clone(&active.state), peer, sequence, mime, offset)
+                    .await;
+            }
         }
     }
     if let Some(active) = generation {
@@ -283,6 +442,8 @@ async fn start_generation(
         Arc::clone(&inner.observable),
         inner.channel_pool.clone(),
         inner.receiver_access.clone(),
+        Arc::clone(&inner.clipboard),
+        inner.control_tx.clone(),
     )
     .await
     {
@@ -388,7 +549,12 @@ mod tests {
     #[tokio::test]
     async fn input_handle_queues_cursor_sample_without_blocking() {
         let (movement, mut received) = mpsc::channel(1);
-        let input = FlowInputHandle { movement };
+        let (control, _received_control) = mpsc::unbounded_channel();
+        let input = FlowInputHandle {
+            movement,
+            control,
+            clipboard: Arc::new(ClipboardManager::new(default_backend())),
+        };
         let sample = CursorSample {
             position: CursorPosition { x: 100.0, y: 50.0 },
             timestamp: Instant::now(),

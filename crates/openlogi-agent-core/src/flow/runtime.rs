@@ -5,14 +5,21 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
+use std::time::{Duration, Instant};
 
+use buffa::EnumValue;
+use openlogi_core::config::{Config, FlowPeer};
 use openlogi_flow::discovery::{
     CandidateSource, DEFAULT_PORT, ManualCandidateSource, MdnsAdvertiser, MdnsCandidateSource,
-    MdnsRecord,
+    MdnsRecord, collect_candidates,
 };
 use openlogi_flow::frame::FrameKind;
 use openlogi_flow::generated as proto;
 use openlogi_flow::identity::same_device;
+use openlogi_flow::pairing::{
+    DEFAULT_PAIRING_TIMEOUT, PairingAbortReason, PairingSession, PairingState, PeerKeyStore,
+    PersistPeerKeyError,
+};
 use openlogi_flow::sas::PublicKey;
 use openlogi_flow::session::{
     LinkState, PeerConfig, PeerSessionHandle, SessionManager, SessionPolicy, TrustedInitialState,
@@ -20,16 +27,17 @@ use openlogi_flow::session::{
 };
 use openlogi_flow::transport::{
     FlowConnection, FlowEndpoint, MachineIdentity, NotificationEvent, PeerTrust, RpcEvent,
-    message_envelope,
+    SessionTrust, error_envelope, message_envelope,
 };
 use openlogi_hid::{ChannelPool, DeviceRoute};
 use openlogi_hook::edge::{EdgeSide, ExposedEdges};
 use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
 use thiserror::Error;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+use super::clipboard::ClipboardManager;
 use super::config::CompiledFlowConfig;
 use super::handoff::{HandoffBook, handle_notification, handle_rpc, inventory_changed};
 use super::{FlowDeviceSnapshot, RuntimeDevice, is_pointing_device};
@@ -39,6 +47,7 @@ use crate::receiver_access::{ExclusiveAccessReason, ReceiverAccess};
 const FLOW_IDENTITY_FILE: &str = "flow-identity.pk8";
 const PROTOCOL_MIN: u32 = 1;
 const PROTOCOL_MAX: u32 = 1;
+const PAIRING_REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 
 mod controller;
 
@@ -49,20 +58,70 @@ struct FlowGeneration {
     sessions: SessionManager,
     tasks: Vec<JoinHandle<()>>,
     _advertiser: Option<MdnsAdvertiser>,
-    _endpoint: Arc<FlowEndpoint>,
+    endpoint: Arc<FlowEndpoint>,
+    trust: PeerTrust,
+    pairing: Arc<Mutex<Option<ActivePairing>>>,
+    pairing_reserved: Arc<AtomicBool>,
+    pairing_window: Arc<AtomicBool>,
+    control_tx: mpsc::UnboundedSender<controller::Control>,
+}
+
+struct ActivePairing {
+    connection: Arc<FlowConnection>,
+    session: PairingSession,
+    address: String,
+    machine_name: String,
+}
+
+/// Stages the state-machine persistence callback until the runtime can commit
+/// the peer record and promote the live connection as one operation.
+///
+/// `PairingSession` deliberately keeps persistence injected so the protocol
+/// crate stays host-agnostic. The runtime must not write `config.toml` from
+/// that callback: a later connection promotion can still fail, and a config
+/// record without a live trusted connection is a misleading half-complete
+/// pairing. `complete_pairing` is the single durable commit point.
+struct PendingPeerStore {
+    expected: PublicKey,
+}
+
+impl PendingPeerStore {
+    fn new(expected: PublicKey) -> Self {
+        Self { expected }
+    }
+}
+
+impl PeerKeyStore for PendingPeerStore {
+    fn persist_peer_key(&mut self, key: PublicKey) -> Result<(), PersistPeerKeyError> {
+        if key != self.expected {
+            return Err(PersistPeerKeyError::new(
+                "pairing callback returned an unexpected peer key",
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl FlowGeneration {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "startup owns identity, endpoint, discovery, sessions, and task wiring as one lifecycle"
+    )]
     async fn start(
         config: Arc<CompiledFlowConfig>,
         snapshots: &[FlowDeviceSnapshot],
         observable: Arc<ObservableState>,
         channel_pool: ChannelPool,
         receiver_access: ReceiverAccess,
+        clipboard: Arc<ClipboardManager>,
+        control_tx: mpsc::UnboundedSender<controller::Control>,
     ) -> Result<Self, FlowRuntimeError> {
         let identity = tokio::task::spawn_blocking(load_machine_identity)
             .await
             .map_err(|error| FlowRuntimeError::IdentityTask(error.to_string()))??;
+        let mut capabilities = vec![EnumValue::from(proto::Capability::ClipboardText as i32)];
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
+        capabilities.push(EnumValue::from(proto::Capability::ClipboardFiles as i32));
         let hello = proto::Hello {
             proto_min: PROTOCOL_MIN,
             proto_max: PROTOCOL_MAX,
@@ -71,12 +130,18 @@ impl FlowGeneration {
             machine_name: machine_name(),
             platform: platform().into(),
             app_version: env!("CARGO_PKG_VERSION").to_owned(),
+            capabilities,
             ..Default::default()
         };
+        // Keep a single trust object that can admit one unknown identity only
+        // while an explicit pairing command is active. Pairing starts disabled
+        // so normal Flow connections remain strictly pinned.
+        let trust = PeerTrust::pairing(config.peers.iter().map(|peer| peer.public_key));
+        trust.disable_pairing();
         let endpoint = Arc::new(FlowEndpoint::bind(
             SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
             identity,
-            PeerTrust::pinned(config.peers.iter().map(|peer| peer.public_key)),
+            trust.clone(),
             hello,
         )?);
         let record = MdnsRecord::new(endpoint.public_key(), PROTOCOL_MIN, PROTOCOL_MAX)?;
@@ -114,16 +179,33 @@ impl FlowGeneration {
             observable,
             channel_pool,
             receiver_access,
+            clipboard,
         ));
         let provider: Arc<dyn TrustedStateProvider> = state.clone();
-        let sessions = SessionManager::start(
+        let mut sessions = SessionManager::start(
             Arc::clone(&endpoint),
             peers,
             provider,
             SessionPolicy::default(),
         )?;
+        let pairing_connections = sessions
+            .take_pairing_connections()
+            .ok_or_else(|| FlowRuntimeError::Pairing("pairing receiver unavailable".to_owned()))?;
+        let pairing = Arc::new(Mutex::new(None));
+        let pairing_reserved = Arc::new(AtomicBool::new(false));
+        let pairing_window = Arc::new(AtomicBool::new(false));
         let handles: Vec<_> = sessions.peers().cloned().collect();
-        let mut tasks = Vec::with_capacity(handles.len() * 2);
+        let mut tasks = Vec::with_capacity(handles.len() * 2 + 2);
+        tasks.push(tokio::spawn(run_clipboard_loop(Arc::clone(&state))));
+        tasks.push(tokio::spawn(run_pairing_acceptor(
+            Arc::clone(&state),
+            trust.clone(),
+            Arc::clone(&pairing),
+            Arc::clone(&pairing_reserved),
+            Arc::clone(&pairing_window),
+            pairing_connections,
+            control_tx.clone(),
+        )));
         for handle in handles {
             tasks.push(tokio::spawn(watch_link_state(
                 Arc::clone(&state),
@@ -137,8 +219,318 @@ impl FlowGeneration {
             sessions,
             tasks,
             _advertiser: advertiser,
-            _endpoint: endpoint,
+            endpoint,
+            trust,
+            pairing,
+            pairing_reserved,
+            pairing_window,
+            control_tx,
         })
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "outgoing pairing owns discovery, authentication, and active-session publication"
+    )]
+    pub(super) async fn pair_start(
+        &self,
+        address: String,
+    ) -> Result<(), openlogi_ipc::FlowCommandError> {
+        if !self.state.config.enabled {
+            return Err(openlogi_ipc::FlowCommandError::Disabled);
+        }
+        if self
+            .pairing_reserved
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(openlogi_ipc::FlowCommandError::AlreadyActive);
+        }
+        if self.pairing_window.load(Ordering::Acquire) {
+            self.pairing_reserved.store(false, Ordering::Release);
+            return Err(openlogi_ipc::FlowCommandError::AlreadyActive);
+        }
+        if address.trim().is_empty() {
+            self.pairing_reserved.store(false, Ordering::Release);
+            return Err(openlogi_ipc::FlowCommandError::Invalid {
+                message: "Flow peer address is empty".to_owned(),
+            });
+        }
+        self.trust.enable_pairing();
+        self.state
+            .set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Connecting {
+                address: address.clone(),
+            }));
+        let mut candidate_connection = None;
+        let result = async {
+            let source = Arc::new(ManualCandidateSource::new([address.clone()]));
+            let candidates = collect_candidates(
+                &[source as Arc<dyn CandidateSource>],
+                PublicKey::new([0; 32]),
+            )
+            .await
+            .map_err(|error| openlogi_ipc::FlowCommandError::Connection {
+                message: error.to_string(),
+            })?;
+            let mut connected = None;
+            for candidate in candidates {
+                if let Ok(Ok(connection)) =
+                    tokio::time::timeout(PAIRING_REQUEST_TIMEOUT, self.endpoint.connect(candidate))
+                        .await
+                {
+                    connected = Some(Arc::new(connection));
+                    break;
+                }
+            }
+            let Some(connection) = connected else {
+                return Err(openlogi_ipc::FlowCommandError::Connection {
+                    message: format!("could not connect to {address}"),
+                });
+            };
+            candidate_connection = Some(Arc::clone(&connection));
+            let mut session = PairingSession::new(
+                connection.local_key(),
+                connection.peer_key(),
+                connection.local_nonce(),
+                connection.peer_nonce(),
+            );
+            let request = session.start().map_err(pairing_command_error)?;
+            let response =
+                message_envelope(FrameKind::PairStart, &request).map_err(pairing_command_error)?;
+            let response = tokio::time::timeout(PAIRING_REQUEST_TIMEOUT, connection.call(response))
+                .await
+                .map_err(|_| openlogi_ipc::FlowCommandError::Connection {
+                    message: "pairing prompt timed out".to_owned(),
+                })?
+                .map_err(pairing_command_error)?;
+            let prompted = response
+                .decode::<proto::PairPrompted>(openlogi_flow::frame::InboundRole::Notification)
+                .map_err(|error| openlogi_ipc::FlowCommandError::Protocol {
+                    message: format!("invalid PairPrompted response: {error:?}"),
+                })?;
+            session
+                .receive_prompted(&prompted, Instant::now())
+                .map_err(pairing_command_error)?;
+            let active = ActivePairing {
+                machine_name: connection.peer_hello().machine_name.clone(),
+                connection,
+                session,
+                address,
+            };
+            self.state
+                .set_pairing_phase(Some(pairing_phase(&active.session, &active.machine_name)));
+            *self.pairing.lock().await = Some(active);
+            candidate_connection = None;
+            self.spawn_pairing_connection_task();
+            Ok(())
+        }
+        .await;
+        if let Err(error) = &result {
+            if let Some(connection) = candidate_connection {
+                connection.close();
+            }
+            self.trust.disable_pairing();
+            self.pairing_window.store(false, Ordering::Release);
+            self.pairing_reserved.store(false, Ordering::Release);
+            self.state
+                .set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Failed(
+                    pairing_failure(error),
+                )));
+        }
+        result
+    }
+
+    pub(super) async fn pair_listen(&self) -> Result<(), openlogi_ipc::FlowCommandError> {
+        if !self.state.config.enabled {
+            return Err(openlogi_ipc::FlowCommandError::Disabled);
+        }
+        if self.pairing.lock().await.is_some()
+            || self.pairing_reserved.load(Ordering::Acquire)
+            || self
+                .pairing_window
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            return Err(openlogi_ipc::FlowCommandError::AlreadyActive);
+        }
+        self.trust.enable_pairing();
+        self.state
+            .set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Connecting {
+                address: "incoming".to_owned(),
+            }));
+        let state = Arc::clone(&self.state);
+        let trust = self.trust.clone();
+        let window = Arc::clone(&self.pairing_window);
+        tokio::spawn(async move {
+            tokio::time::sleep(DEFAULT_PAIRING_TIMEOUT).await;
+            if window.swap(false, Ordering::AcqRel) && state.is_active() {
+                trust.disable_pairing();
+                state.set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Failed(
+                    openlogi_ipc::FlowPairingFailure::Timeout,
+                )));
+            }
+        });
+        Ok(())
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "confirmation owns local SAS state, remote response, and simultaneous-completion cleanup"
+    )]
+    pub(super) async fn pair_confirm(&self) -> Result<(), openlogi_ipc::FlowCommandError> {
+        let connection = {
+            let guard = self.pairing.lock().await;
+            let Some(active) = guard.as_ref() else {
+                return Err(openlogi_ipc::FlowCommandError::NoActiveSession);
+            };
+            Arc::clone(&active.connection)
+        };
+        {
+            let mut guard = self.pairing.lock().await;
+            let Some(active) = guard.as_mut() else {
+                return Err(openlogi_ipc::FlowCommandError::NoActiveSession);
+            };
+            let mut store = PendingPeerStore::new(active.session.peer_key());
+            active
+                .session
+                .confirm_local(Instant::now(), &mut store)
+                .map_err(pairing_command_error)?;
+            self.state
+                .set_pairing_phase(Some(pairing_phase(&active.session, &active.machine_name)));
+        }
+        let request = message_envelope(FrameKind::PairConfirm, &proto::PairConfirm::default())
+            .map_err(pairing_command_error)?;
+        let outcome =
+            match tokio::time::timeout(PAIRING_REQUEST_TIMEOUT, connection.call(request)).await {
+                Err(_) if pairing_already_completed(&self.state) => return Ok(()),
+                Err(_) => Err(openlogi_ipc::FlowCommandError::Connection {
+                    message: "pairing confirmation timed out".to_owned(),
+                }),
+                Ok(Ok(response)) => response
+                    .decode::<proto::PairOutcome>(openlogi_flow::frame::InboundRole::Notification)
+                    .map_err(|error| openlogi_ipc::FlowCommandError::Protocol {
+                        message: format!("invalid PairOutcome response: {error:?}"),
+                    }),
+                Ok(Err(error)) => Err(pairing_command_error(error)),
+            };
+        let outcome = match outcome {
+            Ok(outcome) => outcome,
+            Err(error) => {
+                if pairing_already_completed(&self.state) {
+                    return Ok(());
+                }
+                fail_pairing(
+                    &self.state,
+                    &self.trust,
+                    &self.pairing,
+                    &self.pairing_reserved,
+                    pairing_failure(&error),
+                )
+                .await;
+                return Err(error);
+            }
+        };
+        let paired = {
+            let mut guard = self.pairing.lock().await;
+            let Some(active) = guard.as_mut() else {
+                if pairing_already_completed(&self.state) {
+                    return Ok(());
+                }
+                return Err(openlogi_ipc::FlowCommandError::Unavailable);
+            };
+            let mut store = PendingPeerStore::new(active.session.peer_key());
+            let result = active
+                .session
+                .receive_outcome_with_store(&outcome, &mut store)
+                .map_err(pairing_command_error);
+            if let Err(error) = result {
+                drop(guard);
+                fail_pairing(
+                    &self.state,
+                    &self.trust,
+                    &self.pairing,
+                    &self.pairing_reserved,
+                    pairing_failure(&error),
+                )
+                .await;
+                return Err(error);
+            }
+            self.state
+                .set_pairing_phase(Some(pairing_phase(&active.session, &active.machine_name)));
+            active.session.state() == PairingState::Paired
+        };
+        if paired {
+            // The peer may have confirmed on its own RPC stream at the same
+            // time. Its handler can complete and remove the shared session
+            // before this call receives the matching outcome; in that case
+            // the durable commit and generation restart already happened.
+            let Some(mut active) = self.pairing.lock().await.take() else {
+                return Ok(());
+            };
+            match complete_pairing(&self.state, &self.trust, &mut active, &self.control_tx) {
+                Ok(()) => self.pairing_reserved.store(false, Ordering::Release),
+                Err(error) => {
+                    active.connection.close();
+                    self.trust.disable_pairing();
+                    self.pairing_reserved.store(false, Ordering::Release);
+                    self.state
+                        .set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Failed(
+                            pairing_failure(&error),
+                        )));
+                    return Err(error);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn pair_reject(&self) -> Result<(), openlogi_ipc::FlowCommandError> {
+        self.finish_pairing(PairingAbortReason::CodeMismatch, true)
+            .await
+    }
+
+    pub(super) async fn pair_cancel(&self) -> Result<(), openlogi_ipc::FlowCommandError> {
+        self.finish_pairing(PairingAbortReason::UserCancelled, false)
+            .await
+    }
+
+    async fn finish_pairing(
+        &self,
+        reason: PairingAbortReason,
+        rejected: bool,
+    ) -> Result<(), openlogi_ipc::FlowCommandError> {
+        let Some(mut active) = self.pairing.lock().await.take() else {
+            return Err(openlogi_ipc::FlowCommandError::NoActiveSession);
+        };
+        let _ = active.session.abort(reason);
+        let abort = proto::PairAbort {
+            reason: proto::PairAbortReason::from(reason).into(),
+            ..Default::default()
+        };
+        if let Ok(envelope) = message_envelope(FrameKind::PairAbort, &abort) {
+            let _ = active.connection.notify(envelope).await;
+        }
+        active.connection.close();
+        self.trust.disable_pairing();
+        self.pairing_window.store(false, Ordering::Release);
+        self.pairing_reserved.store(false, Ordering::Release);
+        self.state
+            .set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Failed(if rejected {
+                openlogi_ipc::FlowPairingFailure::Rejected
+            } else {
+                openlogi_ipc::FlowPairingFailure::Cancelled
+            })));
+        Ok(())
+    }
+
+    fn spawn_pairing_connection_task(&self) {
+        tokio::spawn(run_pairing_connection(
+            Arc::clone(&self.state),
+            self.trust.clone(),
+            Arc::clone(&self.pairing),
+            Arc::clone(&self.pairing_reserved),
+            self.control_tx.clone(),
+        ));
     }
 
     async fn update_devices(&self, snapshots: &[FlowDeviceSnapshot]) {
@@ -152,6 +544,13 @@ impl FlowGeneration {
             let _lifecycle = self.state.lifecycle.lock().await;
             self.state.active.store(false, Ordering::Release);
         }
+        if let Some(active) = self.pairing.lock().await.take() {
+            active.connection.close();
+        }
+        self.trust.disable_pairing();
+        self.pairing_window.store(false, Ordering::Release);
+        self.pairing_reserved.store(false, Ordering::Release);
+        self.state.clipboard.reset_remote().await;
         self.sessions.shutdown().await;
         for task in self.tasks.drain(..) {
             let _ = task.await;
@@ -173,6 +572,8 @@ pub(super) struct GenerationState {
     active: AtomicBool,
     pub(super) lifecycle: Mutex<()>,
     pub(super) handoffs: HandoffBook,
+    pub(super) clipboard: Arc<ClipboardManager>,
+    pairing_phase: RwLock<Option<openlogi_ipc::FlowPairingPhase>>,
 }
 
 #[derive(Clone, Default)]
@@ -197,6 +598,7 @@ impl GenerationState {
         observable: Arc<ObservableState>,
         channel_pool: ChannelPool,
         receiver_access: ReceiverAccess,
+        clipboard: Arc<ClipboardManager>,
     ) -> Self {
         let devices = runtime_devices(&config, snapshots);
         Self {
@@ -213,7 +615,16 @@ impl GenerationState {
             active: AtomicBool::new(true),
             lifecycle: Mutex::new(()),
             handoffs: HandoffBook::default(),
+            clipboard,
+            pairing_phase: RwLock::new(None),
         }
+    }
+
+    pub(super) fn set_pairing_phase(&self, phase: Option<openlogi_ipc::FlowPairingPhase>) {
+        if let Ok(mut current) = self.pairing_phase.write() {
+            *current = phase;
+        }
+        self.publish_status();
     }
 
     pub(super) fn is_active(&self) -> bool {
@@ -241,6 +652,13 @@ impl GenerationState {
             .and_then(|connections| connections.get(&peer).cloned())
     }
 
+    pub(super) fn connections_snapshot(&self) -> Vec<Arc<FlowConnection>> {
+        self.connections.read().map_or_else(
+            |_| Vec::new(),
+            |connections| connections.values().cloned().collect(),
+        )
+    }
+
     fn set_connection(&self, peer: PublicKey, connection: Option<Arc<FlowConnection>>) {
         if let Ok(mut connections) = self.connections.write() {
             match connection {
@@ -252,6 +670,14 @@ impl GenerationState {
                 }
             }
         }
+    }
+
+    async fn clear_peer_state(&self, peer: PublicKey) {
+        if let Ok(mut states) = self.remote_states.write() {
+            states.remove(&peer);
+        }
+        self.handoffs.forget_peer(peer).await;
+        self.clipboard.forget_peer(peer).await;
     }
 
     pub(super) fn update_remote_devices(
@@ -338,6 +764,11 @@ impl GenerationState {
                         .map_or(FlowLinkState::Lost, ipc_link_state),
                 })
                 .collect(),
+            pairing: self
+                .pairing_phase
+                .read()
+                .ok()
+                .and_then(|phase| phase.clone()),
         });
     }
 
@@ -519,6 +950,9 @@ async fn watch_connection(state: Arc<GenerationState>, handle: PeerSessionHandle
             let _ = task.await;
         }
         let connection = changes.borrow_and_update().clone();
+        // Device and clipboard revisions are scoped to a live session. A peer
+        // may restart its agent and begin again at revision/sequence one.
+        state.clear_peer_state(peer).await;
         state.set_connection(peer, connection.clone());
         if let Some(connection) = connection {
             application = Some(tokio::spawn(run_application_connection(
@@ -557,6 +991,636 @@ async fn run_application_connection(
                 }
                 Err(_) => return,
             },
+        }
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "inbound pairing owns admission, prompt exchange, and active-session publication"
+)]
+async fn run_pairing_acceptor(
+    state: Arc<GenerationState>,
+    trust: PeerTrust,
+    pairing: Arc<Mutex<Option<ActivePairing>>>,
+    pairing_reserved: Arc<AtomicBool>,
+    pairing_window: Arc<AtomicBool>,
+    mut incoming: mpsc::Receiver<FlowConnection>,
+    control_tx: mpsc::UnboundedSender<controller::Control>,
+) {
+    while state.is_active() {
+        let Some(connection) = incoming.recv().await else {
+            return;
+        };
+        if !pairing_window.load(Ordering::Acquire)
+            || connection.trust() != SessionTrust::Untrusted
+            || trust.pairing_candidate() != Some(connection.peer_key())
+            || pairing_reserved
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+        {
+            connection.close();
+            continue;
+        }
+        pairing_window.store(false, Ordering::Release);
+        let connection = Arc::new(connection);
+        let Ok(Ok(RpcEvent::Request(rpc))) =
+            tokio::time::timeout(PAIRING_REQUEST_TIMEOUT, connection.accept_rpc()).await
+        else {
+            connection.close();
+            fail_pairing(
+                &state,
+                &trust,
+                &pairing,
+                &pairing_reserved,
+                openlogi_ipc::FlowPairingFailure::Connection {
+                    message: "pairing connection did not provide PairStart".to_owned(),
+                },
+            )
+            .await;
+            continue;
+        };
+        if rpc.request().kind != FrameKind::PairStart {
+            if let Ok(error) = error_envelope(proto::ErrorCode::Invalid, "expected PairStart") {
+                let _ = rpc.respond(error).await;
+            }
+            connection.close();
+            fail_pairing(
+                &state,
+                &trust,
+                &pairing,
+                &pairing_reserved,
+                openlogi_ipc::FlowPairingFailure::Protocol {
+                    message: "expected PairStart".to_owned(),
+                },
+            )
+            .await;
+            continue;
+        }
+        let mut session = PairingSession::new(
+            connection.local_key(),
+            connection.peer_key(),
+            connection.local_nonce(),
+            connection.peer_nonce(),
+        );
+        let Ok(prompt) = session.receive_start(Instant::now(), None) else {
+            connection.close();
+            fail_pairing(
+                &state,
+                &trust,
+                &pairing,
+                &pairing_reserved,
+                openlogi_ipc::FlowPairingFailure::Protocol {
+                    message: "PairStart is invalid in the current state".to_owned(),
+                },
+            )
+            .await;
+            continue;
+        };
+        let Ok(response) = message_envelope(FrameKind::PairPrompted, &prompt) else {
+            connection.close();
+            fail_pairing(
+                &state,
+                &trust,
+                &pairing,
+                &pairing_reserved,
+                openlogi_ipc::FlowPairingFailure::Protocol {
+                    message: "could not encode pairing prompt".to_owned(),
+                },
+            )
+            .await;
+            continue;
+        };
+        if rpc.respond(response).await.is_err() {
+            connection.close();
+            fail_pairing(
+                &state,
+                &trust,
+                &pairing,
+                &pairing_reserved,
+                openlogi_ipc::FlowPairingFailure::Connection {
+                    message: "could not send pairing prompt".to_owned(),
+                },
+            )
+            .await;
+            continue;
+        }
+        let machine_name = connection.peer_hello().machine_name.clone();
+        let address = connection.remote_addr().to_string();
+        let active = ActivePairing {
+            connection,
+            session,
+            address,
+            machine_name,
+        };
+        let mut pairing_guard = pairing.lock().await;
+        if pairing_guard.is_some() {
+            active.connection.close();
+            drop(pairing_guard);
+            fail_pairing(
+                &state,
+                &trust,
+                &pairing,
+                &pairing_reserved,
+                openlogi_ipc::FlowPairingFailure::AlreadyActive,
+            )
+            .await;
+            continue;
+        }
+        state.set_pairing_phase(Some(pairing_phase(&active.session, &active.machine_name)));
+        *pairing_guard = Some(active);
+        drop(pairing_guard);
+        tokio::spawn(run_pairing_connection(
+            Arc::clone(&state),
+            trust.clone(),
+            Arc::clone(&pairing),
+            Arc::clone(&pairing_reserved),
+            control_tx.clone(),
+        ));
+    }
+}
+
+#[expect(
+    clippy::too_many_lines,
+    reason = "pairing owns the bounded RPC, notification, timeout, and cleanup state machine"
+)]
+async fn run_pairing_connection(
+    state: Arc<GenerationState>,
+    trust: PeerTrust,
+    pairing: Arc<Mutex<Option<ActivePairing>>>,
+    pairing_reserved: Arc<AtomicBool>,
+    control_tx: mpsc::UnboundedSender<controller::Control>,
+) {
+    while state.is_active() {
+        let connection = {
+            let guard = pairing.lock().await;
+            let Some(active) = guard.as_ref() else {
+                return;
+            };
+            if active.session.state() == PairingState::Paired {
+                return;
+            }
+            Arc::clone(&active.connection)
+        };
+        let rpc = connection.accept_rpc();
+        let notification = connection.accept_notification();
+        tokio::pin!(rpc);
+        tokio::pin!(notification);
+        tokio::select! {
+            event = &mut rpc => {
+                match event {
+                    Ok(RpcEvent::Request(request)) => {
+                        handle_pairing_rpc(
+                            Arc::clone(&state),
+                            trust.clone(),
+                            Arc::clone(&pairing),
+                            Arc::clone(&pairing_reserved),
+                            control_tx.clone(),
+                            request,
+                        )
+                        .await;
+                    }
+                    Ok(RpcEvent::Rejected(_)) => {
+                        fail_pairing(
+                            &state,
+                            &trust,
+                            &pairing,
+                            &pairing_reserved,
+                            openlogi_ipc::FlowPairingFailure::Protocol {
+                                message: "peer rejected a pairing request".to_owned(),
+                            },
+                        ).await;
+                        return;
+                    }
+                    Err(_) => {
+                        fail_pairing(
+                            &state,
+                            &trust,
+                            &pairing,
+                            &pairing_reserved,
+                            openlogi_ipc::FlowPairingFailure::Connection {
+                                message: "pairing connection closed".to_owned(),
+                            },
+                        ).await;
+                        return;
+                    }
+                }
+            }
+            event = &mut notification => {
+                match event {
+                    Ok(NotificationEvent::Notification(notification))
+                        if notification.kind == FrameKind::PairAbort =>
+                    {
+                        handle_pairing_abort(
+                            Arc::clone(&state),
+                            trust.clone(),
+                            Arc::clone(&pairing),
+                            Arc::clone(&pairing_reserved),
+                            notification,
+                        )
+                        .await;
+                        return;
+                    }
+                    Ok(NotificationEvent::Notification(_) | NotificationEvent::Dropped(_)) => {}
+                    Err(_) => {
+                        fail_pairing(
+                            &state,
+                            &trust,
+                            &pairing,
+                            &pairing_reserved,
+                            openlogi_ipc::FlowPairingFailure::Connection {
+                                message: "pairing connection closed".to_owned(),
+                            },
+                        ).await;
+                        return;
+                    }
+                }
+            }
+            () = tokio::time::sleep(Duration::from_millis(250)) => {
+                let timed_out = {
+                    let mut guard = pairing.lock().await;
+                    let Some(active) = guard.as_mut() else { return; };
+                    active.session.check_timeout(Instant::now()).is_some()
+                };
+                if timed_out {
+                    let connection = pairing
+                        .lock()
+                        .await
+                        .as_ref()
+                        .map(|active| Arc::clone(&active.connection));
+                    if let Some(connection) = connection
+                        && let Ok(envelope) = message_envelope(
+                            FrameKind::PairAbort,
+                            &proto::PairAbort {
+                                reason: proto::PairAbortReason::Timeout.into(),
+                                ..Default::default()
+                            },
+                        )
+                    {
+                        let _ = connection.notify(envelope).await;
+                    }
+                    fail_pairing(
+                        &state,
+                        &trust,
+                        &pairing,
+                        &pairing_reserved,
+                        openlogi_ipc::FlowPairingFailure::Timeout,
+                    ).await;
+                    return;
+                }
+            }
+        }
+    }
+}
+
+async fn handle_pairing_rpc(
+    state: Arc<GenerationState>,
+    trust: PeerTrust,
+    pairing: Arc<Mutex<Option<ActivePairing>>>,
+    pairing_reserved: Arc<AtomicBool>,
+    control_tx: mpsc::UnboundedSender<controller::Control>,
+    request: openlogi_flow::transport::IncomingRpc,
+) {
+    if request.request().kind != FrameKind::PairConfirm {
+        if let Ok(error) = error_envelope(proto::ErrorCode::Invalid, "expected PairConfirm") {
+            let _ = request.respond(error).await;
+        }
+        return;
+    }
+    let outcome = {
+        let mut guard = pairing.lock().await;
+        let Some(active) = guard.as_mut() else {
+            return;
+        };
+        let mut store = PendingPeerStore::new(active.session.peer_key());
+        match active.session.receive_confirm(Instant::now(), &mut store) {
+            Ok(outcome) => {
+                state.set_pairing_phase(Some(pairing_phase(&active.session, &active.machine_name)));
+                Ok(outcome)
+            }
+            Err(error) => Err(error.to_string()),
+        }
+    };
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(detail) => {
+            if let Ok(response) = error_envelope(proto::ErrorCode::Invalid, &detail) {
+                let _ = request.respond(response).await;
+            }
+            fail_pairing(
+                &state,
+                &trust,
+                &pairing,
+                &pairing_reserved,
+                openlogi_ipc::FlowPairingFailure::Protocol { message: detail },
+            )
+            .await;
+            return;
+        }
+    };
+    let Ok(response) = message_envelope(FrameKind::PairOutcome, &outcome) else {
+        fail_pairing(
+            &state,
+            &trust,
+            &pairing,
+            &pairing_reserved,
+            openlogi_ipc::FlowPairingFailure::Protocol {
+                message: "could not encode pairing outcome".to_owned(),
+            },
+        )
+        .await;
+        return;
+    };
+    if request.respond(response).await.is_err() {
+        fail_pairing(
+            &state,
+            &trust,
+            &pairing,
+            &pairing_reserved,
+            openlogi_ipc::FlowPairingFailure::Connection {
+                message: "could not send pairing outcome".to_owned(),
+            },
+        )
+        .await;
+        return;
+    }
+    let paired = pairing
+        .lock()
+        .await
+        .as_ref()
+        .is_some_and(|active| active.session.state() == PairingState::Paired);
+    if paired {
+        let Some(mut active) = pairing.lock().await.take() else {
+            return;
+        };
+        match complete_pairing(&state, &trust, &mut active, &control_tx) {
+            Ok(()) => pairing_reserved.store(false, Ordering::Release),
+            Err(error) => {
+                active.connection.close();
+                trust.disable_pairing();
+                pairing_reserved.store(false, Ordering::Release);
+                state.set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Failed(
+                    pairing_failure(&error),
+                )));
+            }
+        }
+    }
+}
+
+async fn handle_pairing_abort(
+    state: Arc<GenerationState>,
+    trust: PeerTrust,
+    pairing: Arc<Mutex<Option<ActivePairing>>>,
+    pairing_reserved: Arc<AtomicBool>,
+    notification: openlogi_flow::frame::Envelope,
+) {
+    let Ok(abort) =
+        notification.decode::<proto::PairAbort>(openlogi_flow::frame::InboundRole::Notification)
+    else {
+        fail_pairing(
+            &state,
+            &trust,
+            &pairing,
+            &pairing_reserved,
+            openlogi_ipc::FlowPairingFailure::Protocol {
+                message: "invalid PairAbort payload".to_owned(),
+            },
+        )
+        .await;
+        return;
+    };
+    let failure = match abort.reason.as_known() {
+        Some(proto::PairAbortReason::CodeMismatch) => openlogi_ipc::FlowPairingFailure::Rejected,
+        Some(proto::PairAbortReason::Timeout) => openlogi_ipc::FlowPairingFailure::Timeout,
+        Some(proto::PairAbortReason::UserCancelled) => openlogi_ipc::FlowPairingFailure::Cancelled,
+        Some(proto::PairAbortReason::Unspecified) | None => {
+            openlogi_ipc::FlowPairingFailure::Protocol {
+                message: "invalid PairAbort reason".to_owned(),
+            }
+        }
+    };
+    let valid = {
+        let mut guard = pairing.lock().await;
+        let Some(active) = guard.as_mut() else {
+            return;
+        };
+        active.session.receive_abort(&abort).is_ok()
+    };
+    if valid {
+        fail_pairing(&state, &trust, &pairing, &pairing_reserved, failure).await;
+    } else {
+        fail_pairing(
+            &state,
+            &trust,
+            &pairing,
+            &pairing_reserved,
+            openlogi_ipc::FlowPairingFailure::Protocol {
+                message: "PairAbort is invalid in the current state".to_owned(),
+            },
+        )
+        .await;
+    }
+}
+
+fn complete_pairing(
+    state: &GenerationState,
+    trust: &PeerTrust,
+    active: &mut ActivePairing,
+    control_tx: &mpsc::UnboundedSender<controller::Control>,
+) -> Result<(), openlogi_ipc::FlowCommandError> {
+    let key = active.session.peer_key();
+    let public_key = format_public_key(key);
+    let mut config =
+        Config::load_or_default().map_err(|error| openlogi_ipc::FlowCommandError::Persistence {
+            message: error.to_string(),
+        })?;
+    let base_name = if active.machine_name.trim().is_empty() {
+        "OpenLogi peer".to_owned()
+    } else {
+        active.machine_name.trim().to_owned()
+    };
+    let mut name = base_name.clone();
+    let mut suffix = 2_u32;
+    while config
+        .flow
+        .peers
+        .iter()
+        .any(|peer| peer.name == name && peer.public_key != public_key)
+    {
+        name = format!("{base_name} ({suffix})");
+        suffix = suffix.saturating_add(1);
+    }
+    if let Some(peer) = config
+        .flow
+        .peers
+        .iter_mut()
+        .find(|peer| peer.public_key == public_key)
+    {
+        name.clone_from(&peer.name);
+        if !active.address.is_empty() && !peer.addresses.contains(&active.address) {
+            peer.addresses.push(active.address.clone());
+        }
+    } else {
+        config.flow.peers.push(FlowPeer {
+            name: name.clone(),
+            public_key: public_key.clone(),
+            addresses: if active.address.is_empty() {
+                Vec::new()
+            } else {
+                vec![active.address.clone()]
+            },
+        });
+    }
+    active
+        .connection
+        .promote_after_pairing(&active.session)
+        .map_err(pairing_command_error)?;
+    let inserted_pin = trust.pin(key);
+    if let Err(error) = config.save_atomic() {
+        if inserted_pin {
+            let _ = trust.unpin(key);
+        }
+        active.connection.revoke_pairing_promotion();
+        return Err(openlogi_ipc::FlowCommandError::Persistence {
+            message: error.to_string(),
+        });
+    }
+    trust.disable_pairing();
+    state.set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Paired {
+        name: name.clone(),
+        public_key: public_key.clone(),
+    }));
+    let _ = control_tx.send(controller::Control::PairCompleted);
+    Ok(())
+}
+
+fn pairing_phase(session: &PairingSession, machine_name: &str) -> openlogi_ipc::FlowPairingPhase {
+    let public_key = format_public_key(session.peer_key());
+    match session.state() {
+        PairingState::Prompted {
+            local_confirmed,
+            peer_confirmed,
+            ..
+        } => openlogi_ipc::FlowPairingPhase::Prompted {
+            public_key,
+            machine_name: machine_name.to_owned(),
+            sas: session
+                .sas_code()
+                .map_or_else(|| "------".to_owned(), |code| code.to_string()),
+            local_confirmed,
+            peer_confirmed,
+        },
+        PairingState::Paired => openlogi_ipc::FlowPairingPhase::Paired {
+            name: machine_name.to_owned(),
+            public_key,
+        },
+        PairingState::Rejected => {
+            openlogi_ipc::FlowPairingPhase::Failed(openlogi_ipc::FlowPairingFailure::Rejected)
+        }
+        PairingState::TimedOut => {
+            openlogi_ipc::FlowPairingPhase::Failed(openlogi_ipc::FlowPairingFailure::Timeout)
+        }
+        PairingState::Aborted(reason) => openlogi_ipc::FlowPairingPhase::Failed(match reason {
+            PairingAbortReason::CodeMismatch => openlogi_ipc::FlowPairingFailure::Rejected,
+            PairingAbortReason::Timeout => openlogi_ipc::FlowPairingFailure::Timeout,
+            PairingAbortReason::UserCancelled => openlogi_ipc::FlowPairingFailure::Cancelled,
+        }),
+        PairingState::Idle | PairingState::AwaitingPrompt => {
+            openlogi_ipc::FlowPairingPhase::Connecting {
+                address: String::new(),
+            }
+        }
+    }
+}
+
+fn pairing_already_completed(state: &GenerationState) -> bool {
+    state
+        .pairing_phase
+        .read()
+        .is_ok_and(|phase| matches!(&*phase, Some(openlogi_ipc::FlowPairingPhase::Paired { .. })))
+}
+
+fn format_public_key(key: PublicKey) -> String {
+    let mut value = String::from("ed25519:");
+    for byte in key.as_bytes() {
+        use std::fmt::Write as _;
+        let _ = write!(value, "{byte:02x}");
+    }
+    value
+}
+
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "used directly as map_err callback, which supplies owned protocol errors"
+)]
+fn pairing_command_error(error: impl ToString) -> openlogi_ipc::FlowCommandError {
+    openlogi_ipc::FlowCommandError::Protocol {
+        message: error.to_string(),
+    }
+}
+
+fn pairing_failure(error: &openlogi_ipc::FlowCommandError) -> openlogi_ipc::FlowPairingFailure {
+    match error {
+        openlogi_ipc::FlowCommandError::Disabled | openlogi_ipc::FlowCommandError::Unavailable => {
+            openlogi_ipc::FlowPairingFailure::Unavailable
+        }
+        openlogi_ipc::FlowCommandError::AlreadyActive => {
+            openlogi_ipc::FlowPairingFailure::AlreadyActive
+        }
+        openlogi_ipc::FlowCommandError::NoActiveSession => {
+            openlogi_ipc::FlowPairingFailure::NoActiveSession
+        }
+        openlogi_ipc::FlowCommandError::Invalid { message }
+        | openlogi_ipc::FlowCommandError::Protocol { message } => {
+            openlogi_ipc::FlowPairingFailure::Protocol {
+                message: message.clone(),
+            }
+        }
+        openlogi_ipc::FlowCommandError::Connection { message } => {
+            openlogi_ipc::FlowPairingFailure::Connection {
+                message: message.clone(),
+            }
+        }
+        openlogi_ipc::FlowCommandError::Persistence { message } => {
+            openlogi_ipc::FlowPairingFailure::Persistence {
+                message: message.clone(),
+            }
+        }
+    }
+}
+
+async fn fail_pairing(
+    state: &GenerationState,
+    trust: &PeerTrust,
+    pairing: &Mutex<Option<ActivePairing>>,
+    pairing_reserved: &AtomicBool,
+    failure: openlogi_ipc::FlowPairingFailure,
+) {
+    let connection = pairing.lock().await.take().map(|active| active.connection);
+    if let Some(connection) = connection {
+        connection.close();
+    }
+    trust.disable_pairing();
+    pairing_reserved.store(false, Ordering::Release);
+    state.set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Failed(failure)));
+}
+
+async fn run_clipboard_loop(state: Arc<GenerationState>) {
+    let mut interval = tokio::time::interval(Duration::from_millis(250));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    loop {
+        interval.tick().await;
+        if !state.is_active() {
+            return;
+        }
+        let Some(announce) = state.clipboard.poll_local().await else {
+            continue;
+        };
+        let Ok(envelope) = message_envelope(FrameKind::ClipboardAnnounce, &announce) else {
+            continue;
+        };
+        for connection in state.connections_snapshot() {
+            let _ = connection.notify(envelope.clone()).await;
         }
     }
 }
@@ -699,6 +1763,8 @@ enum FlowRuntimeError {
     Discovery(#[from] openlogi_flow::discovery::DiscoveryError),
     #[error(transparent)]
     Session(#[from] openlogi_flow::session::SessionManagerError),
+    #[error("Flow pairing runtime failed: {0}")]
+    Pairing(String),
     #[error("Flow identity task failed: {0}")]
     IdentityTask(String),
 }
@@ -1295,6 +2361,9 @@ mod tests {
             Arc::new(ObservableState::new("flow-test".into())),
             channel_pool,
             crate::receiver_access::ReceiverAccess::default(),
+            Arc::new(ClipboardManager::new(
+                crate::flow::clipboard::default_backend(),
+            )),
         )
     }
 

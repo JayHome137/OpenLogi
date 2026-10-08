@@ -9,6 +9,7 @@ pub mod backlight;
 pub mod camera;
 pub mod diag;
 pub mod fixture;
+pub mod flow;
 pub mod light;
 pub mod list;
 pub mod snapshot;
@@ -35,6 +36,8 @@ pub enum Command {
     /// Record and validate privacy-safe device fixtures.
     #[command(subcommand)]
     Fixture(fixture::FixtureCmd),
+    /// Manage cross-machine Flow through the running Agent.
+    Flow(flow::FlowArgs),
     /// Inspect and control standalone Logitech lights.
     #[command(subcommand)]
     Light(light::LightCmd),
@@ -58,6 +61,7 @@ impl Command {
             Self::Assets(cmd) => cmd.run()?,
             Self::Diag(cmd) => cmd.run().await?,
             Self::Fixture(cmd) => cmd.run().await?,
+            Self::Flow(args) => return flow::run(args).await,
             Self::Light(cmd) => cmd.run().await?,
         }
         Ok(ExitCode::SUCCESS)

@@ -5727,7 +5727,11 @@ name = "openlogi-agent-core"
 version = "0.8.11"
 dependencies = [
  "axwatch",
+ "buffa",
  "futures-lite",
+ "objc2 0.6.4",
+ "objc2-app-kit 0.3.2",
+ "objc2-foundation 0.3.2",
  "openlogi-core",
  "openlogi-fixture",
  "openlogi-flow",
@@ -5736,10 +5740,12 @@ dependencies = [
  "openlogi-inject",
  "openlogi-ipc",
  "rand 0.9.4",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -5933,6 +5939,7 @@ dependencies = [
  "mdns-sd",
  "openlogi-fixture",
  "quinn",
+ "rand 0.9.4",
  "rcgen",
  "rustls",
  "sha2 0.10.9",

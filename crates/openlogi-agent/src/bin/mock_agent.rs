@@ -60,9 +60,10 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
-    ConfigReloadError, FlowStatus, ForegroundApps, FoundDevice, Generation, Identity,
-    InventoryHealth, MonitorEvent, OBSERVE_HOLD, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation,
+    ConfigReloadError, FlowCommandError, FlowLayout, FlowStatus, ForegroundApps, FoundDevice,
+    Generation, Identity, InventoryHealth, MonitorEvent, OBSERVE_HOLD, Observation,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation,
 };
 use succession::Compat;
 use tarpc::context::Context;
@@ -1012,6 +1013,42 @@ impl Agent for MockAgent {
         let state = self.state.lock().await;
         validate_light_command(&state, &route, LightCommand::Power(enabled))?;
         info!(%route, enabled, "set_light_manual_power");
+        Ok(())
+    }
+
+    async fn flow_set_enabled(self, _: Context, _enabled: bool) -> Result<(), ConfigReloadError> {
+        Ok(())
+    }
+
+    async fn flow_pair_start(self, _: Context, _address: String) -> Result<(), FlowCommandError> {
+        Err(FlowCommandError::Invalid {
+            message: "Flow pairing is unavailable in the mock".to_owned(),
+        })
+    }
+
+    async fn flow_pair_listen(self, _: Context) -> Result<(), FlowCommandError> {
+        Err(FlowCommandError::Invalid {
+            message: "Flow pairing is unavailable in the mock".to_owned(),
+        })
+    }
+
+    async fn flow_pair_confirm(self, _: Context) -> Result<(), FlowCommandError> {
+        Err(FlowCommandError::NoActiveSession)
+    }
+
+    async fn flow_pair_reject(self, _: Context) -> Result<(), FlowCommandError> {
+        Err(FlowCommandError::NoActiveSession)
+    }
+
+    async fn flow_pair_cancel(self, _: Context) -> Result<(), FlowCommandError> {
+        Err(FlowCommandError::NoActiveSession)
+    }
+
+    async fn flow_set_layout(
+        self,
+        _: Context,
+        _layout: Vec<FlowLayout>,
+    ) -> Result<(), ConfigReloadError> {
         Ok(())
     }
 }

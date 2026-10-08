@@ -176,6 +176,7 @@ pub struct SessionManager {
     accept_task: Option<JoinHandle<()>>,
     peer_tasks: Vec<JoinHandle<()>>,
     peers: BTreeMap<PublicKey, PeerSessionHandle>,
+    pairing_connections: Option<mpsc::Receiver<FlowConnection>>,
     _provider: Arc<dyn TrustedStateProvider>,
 }
 
@@ -214,6 +215,7 @@ impl SessionManager {
         }
 
         let (shutdown, shutdown_rx) = watch::channel(false);
+        let (pairing_tx, pairing_rx) = mpsc::channel(INCOMING_QUEUE);
         let mut routes = BTreeMap::new();
         let mut handles = BTreeMap::new();
         let mut peer_tasks = Vec::with_capacity(peers.len());
@@ -245,12 +247,18 @@ impl SessionManager {
                 shutdown_rx.clone(),
             )));
         }
-        let accept_task = runtime.spawn(accept_connections(endpoint, routes, shutdown_rx));
+        let accept_task = runtime.spawn(accept_connections(
+            endpoint,
+            routes,
+            pairing_tx,
+            shutdown_rx,
+        ));
         Ok(Self {
             shutdown,
             accept_task: Some(accept_task),
             peer_tasks,
             peers: handles,
+            pairing_connections: Some(pairing_rx),
             _provider: provider,
         })
     }
@@ -265,6 +273,13 @@ impl SessionManager {
     #[must_use]
     pub fn peers(&self) -> impl ExactSizeIterator<Item = &PeerSessionHandle> {
         self.peers.values()
+    }
+
+    /// Takes the channel carrying TLS-authenticated but not-yet-pinned peers.
+    /// Pairing mode must be enabled on the endpoint for such connections to
+    /// reach this boundary; strict pinned endpoints simply never produce them.
+    pub fn take_pairing_connections(&mut self) -> Option<mpsc::Receiver<FlowConnection>> {
+        self.pairing_connections.take()
     }
 
     /// Stops all workers and closes their live connections without closing the shared endpoint.
@@ -320,6 +335,7 @@ pub enum SessionManagerError {
 async fn accept_connections(
     endpoint: Arc<FlowEndpoint>,
     routes: BTreeMap<PublicKey, mpsc::Sender<FlowConnection>>,
+    pairing: mpsc::Sender<FlowConnection>,
     mut shutdown: watch::Receiver<bool>,
 ) {
     loop {
@@ -330,7 +346,10 @@ async fn accept_connections(
             accepted = endpoint.accept() => match accepted {
                 Ok(connection) => {
                     let Some(route) = routes.get(&connection.peer_key()) else {
-                        connection.close();
+                        if pairing.try_send(connection).is_err() {
+                            // The pairing queue is bounded so an unattended
+                            // unknown peer cannot consume the agent's memory.
+                        }
                         continue;
                     };
                     if let Err(error) = route.try_send(connection) {

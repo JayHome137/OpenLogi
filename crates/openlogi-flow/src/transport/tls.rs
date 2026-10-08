@@ -3,7 +3,8 @@
 use std::{
     collections::BTreeSet,
     fmt,
-    sync::{Arc, Mutex},
+    sync::atomic::{AtomicBool, Ordering},
+    sync::{Arc, Mutex, RwLock},
 };
 
 use rustls::{
@@ -129,8 +130,9 @@ pub enum SessionTrust {
 
 #[derive(Debug)]
 struct TrustState {
-    pinned: BTreeSet<PublicKey>,
+    pinned: RwLock<BTreeSet<PublicKey>>,
     pairing_candidate: Option<Mutex<Option<PublicKey>>>,
+    pairing_enabled: AtomicBool,
 }
 
 /// Pinned peer-key policy shared by the TLS client and server verifiers.
@@ -146,8 +148,9 @@ impl PeerTrust {
     #[must_use]
     pub fn pinned(keys: impl IntoIterator<Item = PublicKey>) -> Self {
         Self(Arc::new(TrustState {
-            pinned: keys.into_iter().collect(),
+            pinned: RwLock::new(keys.into_iter().collect()),
             pairing_candidate: None,
+            pairing_enabled: AtomicBool::new(false),
         }))
     }
 
@@ -155,9 +158,31 @@ impl PeerTrust {
     #[must_use]
     pub fn pairing(keys: impl IntoIterator<Item = PublicKey>) -> Self {
         Self(Arc::new(TrustState {
-            pinned: keys.into_iter().collect(),
+            pinned: RwLock::new(keys.into_iter().collect()),
             pairing_candidate: Some(Mutex::new(None)),
+            pairing_enabled: AtomicBool::new(true),
         }))
+    }
+
+    /// Enables admission of one unknown TLS identity for an explicit pairing
+    /// ceremony. Existing pinned peers remain trusted regardless of this flag.
+    pub fn enable_pairing(&self) {
+        if let Some(candidate) = &self.0.pairing_candidate {
+            if let Ok(mut candidate) = candidate.lock() {
+                *candidate = None;
+            }
+            self.0.pairing_enabled.store(true, Ordering::Release);
+        }
+    }
+
+    /// Disables admission of new unknown identities and clears any candidate.
+    pub fn disable_pairing(&self) {
+        self.0.pairing_enabled.store(false, Ordering::Release);
+        if let Some(candidate) = &self.0.pairing_candidate
+            && let Ok(mut candidate) = candidate.lock()
+        {
+            *candidate = None;
+        }
     }
 
     /// Returns the unknown key admitted by pairing mode, if any.
@@ -169,18 +194,42 @@ impl PeerTrust {
             .and_then(|candidate| candidate.lock().ok().and_then(|guard| *guard))
     }
 
-    pub(super) fn classify(&self, key: PublicKey) -> Result<SessionTrust, RustlsError> {
-        if self
-            .0
+    /// Adds a peer key to the in-memory pin set after a successful ceremony.
+    /// Persistence remains the caller's responsibility.
+    #[must_use]
+    pub fn pin(&self, key: PublicKey) -> bool {
+        if let Ok(mut pinned) = self.0.pinned.write() {
+            pinned.insert(key)
+        } else {
+            false
+        }
+    }
+
+    /// Removes a key that was added by a pairing attempt which later failed
+    /// to persist its configuration. Existing pins are never removed by the
+    /// runtime because they were loaded from the user's trust store.
+    #[must_use]
+    pub fn unpin(&self, key: PublicKey) -> bool {
+        self.0
             .pinned
-            .iter()
-            .any(|pinned| constant_time_key_eq(*pinned, key))
-        {
+            .write()
+            .is_ok_and(|mut pinned| pinned.remove(&key))
+    }
+
+    pub(super) fn classify(&self, key: PublicKey) -> Result<SessionTrust, RustlsError> {
+        if self.0.pinned.read().is_ok_and(|pinned| {
+            pinned
+                .iter()
+                .any(|pinned| constant_time_key_eq(*pinned, key))
+        }) {
             return Ok(SessionTrust::Trusted);
         }
         let Some(candidate) = &self.0.pairing_candidate else {
             return Err(untrusted_certificate());
         };
+        if !self.0.pairing_enabled.load(Ordering::Acquire) {
+            return Err(untrusted_certificate());
+        }
         let mut candidate = candidate
             .lock()
             .map_err(|_| RustlsError::General("pairing candidate lock poisoned".to_owned()))?;
@@ -397,5 +446,15 @@ mod tests {
         let policy = PeerTrust::pairing([pinned]);
         assert_eq!(policy.classify(pinned).unwrap(), SessionTrust::Trusted);
         assert!(policy.pairing_candidate().is_none());
+    }
+
+    #[test]
+    fn pairing_can_be_disabled_until_an_explicit_ceremony() {
+        let policy = PeerTrust::pairing([]);
+        let unknown = PublicKey::new([3; 32]);
+        policy.disable_pairing();
+        policy.classify(unknown).unwrap_err();
+        policy.enable_pairing();
+        assert_eq!(policy.classify(unknown).unwrap(), SessionTrust::Untrusted);
     }
 }

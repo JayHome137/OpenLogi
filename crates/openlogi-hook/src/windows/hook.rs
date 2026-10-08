@@ -17,7 +17,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LWIN, VK_MENU, VK_RWIN,
-    VK_SHIFT,
+    VK_SHIFT, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
@@ -604,6 +604,10 @@ fn translate_key(
 /// Esc/F1–F19 set. Windows numbers `VK_F1`.. consecutively.
 fn mac_keycode(vk: u32) -> Option<u16> {
     let vk = u16::try_from(vk).ok()?;
+    if vk == VK_V {
+        // kVK_ANSI_V; Flow uses this key only to observe Ctrl/Command+V.
+        return Some(0x09);
+    }
     let key = if vk == VK_ESCAPE {
         FunctionKey::Esc
     } else {

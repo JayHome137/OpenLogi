@@ -528,4 +528,19 @@ mod tests {
         Cli::try_parse_from(["openlogi", "fixture", "verify", "one", "two"])
             .expect_err("only one fixture directory may be verified at a time");
     }
+
+    #[test]
+    fn flow_commands_parse_without_exposing_hardware_arguments() {
+        let cli = Cli::try_parse_from(["openlogi", "flow", "pair-start", "desk.local:59869"])
+            .expect("Flow pair-start parses");
+        match cli.cmd.expect("subcommand present") {
+            Command::Flow(_) => {}
+            other => panic!("expected Flow, got {other:?}"),
+        }
+
+        for action in ["status", "enable", "disable", "confirm", "reject", "cancel"] {
+            Cli::try_parse_from(["openlogi", "flow", action])
+                .unwrap_or_else(|error| panic!("flow {action} should parse: {error}"));
+        }
+    }
 }

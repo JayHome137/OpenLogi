@@ -24,8 +24,9 @@ use openlogi_hid::{
 use openlogi_ipc::transport;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus, ClientKind,
-    ConfigReloadError, Generation, Identity, MonitorEvent, Observation, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingUpdate, RingObservation,
+    ConfigReloadError, FlowCommandError, FlowLayout, Generation, Identity, MonitorEvent,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingUpdate,
+    RingObservation,
 };
 use succession::Compat;
 
@@ -364,6 +365,71 @@ impl Agent for AgentServer {
 
     async fn action_ring_cancel(self, _: Context, session_id: u64) {
         self.action_ring.cancel(session_id);
+    }
+
+    async fn flow_set_enabled(self, _: Context, enabled: bool) -> Result<(), ConfigReloadError> {
+        let mut config = Config::load_or_default().map_err(|error| ConfigReloadError {
+            message: error.to_string(),
+        })?;
+        config.flow.enabled = enabled;
+        if enabled {
+            openlogi_agent_core::FlowController::validate_config(&config.flow)
+                .map_err(|message| ConfigReloadError { message })?;
+        }
+        config.save_atomic().map_err(|error| ConfigReloadError {
+            message: error.to_string(),
+        })?;
+        self.orchestrator.lock().await.reload_config(config);
+        Ok(())
+    }
+
+    async fn flow_pair_start(self, _: Context, address: String) -> Result<(), FlowCommandError> {
+        self.shared.flow.pair_start(address).await
+    }
+
+    async fn flow_pair_listen(self, _: Context) -> Result<(), FlowCommandError> {
+        self.shared.flow.pair_listen().await
+    }
+
+    async fn flow_pair_confirm(self, _: Context) -> Result<(), FlowCommandError> {
+        self.shared.flow.pair_confirm().await
+    }
+
+    async fn flow_pair_reject(self, _: Context) -> Result<(), FlowCommandError> {
+        self.shared.flow.pair_reject().await
+    }
+
+    async fn flow_pair_cancel(self, _: Context) -> Result<(), FlowCommandError> {
+        self.shared.flow.pair_cancel().await
+    }
+
+    async fn flow_set_layout(
+        self,
+        _: Context,
+        layout: Vec<FlowLayout>,
+    ) -> Result<(), ConfigReloadError> {
+        let mut config = Config::load_or_default().map_err(|error| ConfigReloadError {
+            message: error.to_string(),
+        })?;
+        config.flow.layout = layout
+            .into_iter()
+            .map(|entry| openlogi_core::config::FlowLayout {
+                edge: match entry.edge {
+                    openlogi_ipc::FlowEdge::Left => openlogi_core::config::FlowEdge::Left,
+                    openlogi_ipc::FlowEdge::Right => openlogi_core::config::FlowEdge::Right,
+                    openlogi_ipc::FlowEdge::Top => openlogi_core::config::FlowEdge::Top,
+                    openlogi_ipc::FlowEdge::Bottom => openlogi_core::config::FlowEdge::Bottom,
+                },
+                peer: entry.peer,
+            })
+            .collect();
+        openlogi_agent_core::FlowController::validate_config(&config.flow)
+            .map_err(|message| ConfigReloadError { message })?;
+        config.save_atomic().map_err(|error| ConfigReloadError {
+            message: error.to_string(),
+        })?;
+        self.orchestrator.lock().await.reload_config(config);
+        Ok(())
     }
 }
 

@@ -203,6 +203,47 @@ fn rejected_key_edges_fail_open() {
 }
 
 #[test]
+fn paste_shortcut_requires_a_key_down_v() {
+    assert!(super::is_paste_shortcut(KeyEvent {
+        keycode: 0x09,
+        pressed: true,
+        modifiers: KeyModifiers {
+            command: true,
+            ..KeyModifiers::default()
+        },
+    }));
+    assert!(super::is_paste_shortcut(KeyEvent {
+        keycode: 0x09,
+        pressed: true,
+        modifiers: KeyModifiers {
+            control: true,
+            ..KeyModifiers::default()
+        },
+    }));
+    assert!(!super::is_paste_shortcut(KeyEvent {
+        keycode: 0x09,
+        pressed: false,
+        modifiers: KeyModifiers {
+            command: true,
+            ..KeyModifiers::default()
+        },
+    }));
+    assert!(!super::is_paste_shortcut(KeyEvent {
+        keycode: 0x09,
+        pressed: true,
+        modifiers: KeyModifiers::default(),
+    }));
+    assert!(!super::is_paste_shortcut(KeyEvent {
+        keycode: 0x04,
+        pressed: true,
+        modifiers: KeyModifiers {
+            command: true,
+            ..KeyModifiers::default()
+        },
+    }));
+}
+
+#[test]
 fn queued_key_action_retains_its_press_time_target() {
     let (dispatcher, mut owner, _events) = test_dispatcher();
     let keycode = 0x7a;

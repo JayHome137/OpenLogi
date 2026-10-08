@@ -116,12 +116,17 @@ impl FlowEndpoint {
             .trust
             .classify(peer_key)
             .map_err(|error| TransportError::Trust(error.to_string()))?;
+        let mut hello = self.hello.clone();
+        hello.session_nonce = rand::random::<[u8; 16]>().to_vec();
+        validate_local_hello(&hello, self.identity.public_key())?;
+        let local_nonce = SessionNonce::try_from(hello.session_nonce.as_slice())
+            .map_err(|_| TransportError::InvalidLocalHello("session nonce is not 16 bytes"))?;
         let (mut control_send, mut control_recv) = match direction {
             ConnectionDirection::Outgoing => connection.open_bi().await?,
             ConnectionDirection::Incoming => connection.accept_bi().await?,
         };
 
-        message_envelope(FrameKind::Hello, &self.hello)?
+        message_envelope(FrameKind::Hello, &hello)?
             .write_to(&mut control_send)
             .await?;
         let peer_frame = Envelope::read_from(&mut control_recv).await?;
@@ -129,7 +134,7 @@ impl FlowEndpoint {
             reject_hello(
                 &connection,
                 &mut control_send,
-                &self.hello,
+                &hello,
                 proto::RejectReason::Malformed,
                 "Hello frame used reserved flags",
             )
@@ -146,7 +151,7 @@ impl FlowEndpoint {
             reject_hello(
                 &connection,
                 &mut control_send,
-                &self.hello,
+                &hello,
                 proto::RejectReason::Malformed,
                 "control stream did not carry Hello",
             )
@@ -156,13 +161,13 @@ impl FlowEndpoint {
         let peer_hello = peer_frame
             .decode::<proto::Hello>(InboundRole::Request)
             .map_err(|_| TransportError::InvalidControlFrame)?;
-        let negotiated = match negotiate(&self.hello, &peer_hello, &peer_key) {
+        let negotiated = match negotiate(&hello, &peer_hello, &peer_key) {
             Ok(negotiated) => negotiated,
             Err(rejection) => {
                 reject_hello(
                     &connection,
                     &mut control_send,
-                    &self.hello,
+                    &hello,
                     rejection.reason(),
                     &rejection.to_string(),
                 )
@@ -184,6 +189,9 @@ impl FlowEndpoint {
             direction,
             local_key: self.identity.public_key(),
             peer_key,
+            local_nonce,
+            peer_nonce: SessionNonce::try_from(peer_hello.session_nonce.as_slice())
+                .map_err(|_| TransportError::InvalidControlFrame)?,
             peer_hello,
             send_gate: SendGate::new(negotiated.clone()),
             negotiated,
@@ -201,6 +209,8 @@ pub struct FlowConnection {
     direction: ConnectionDirection,
     local_key: PublicKey,
     peer_key: PublicKey,
+    local_nonce: SessionNonce,
+    peer_nonce: SessionNonce,
     peer_hello: proto::Hello,
     send_gate: SendGate,
     negotiated: Negotiated,
@@ -218,6 +228,34 @@ impl FlowConnection {
     #[must_use]
     pub const fn peer_key(&self) -> PublicKey {
         self.peer_key
+    }
+
+    /// Returns the socket address used by the peer for this connection.
+    ///
+    /// Pairing uses this observed address as a manual reconnect candidate on
+    /// the receiving side. mDNS remains an additional discovery path, but a
+    /// completed pairing must not depend on multicast being available later.
+    #[must_use]
+    pub fn remote_addr(&self) -> SocketAddr {
+        self.connection.remote_address()
+    }
+
+    /// Returns the local TLS identity used by this connection.
+    #[must_use]
+    pub const fn local_key(&self) -> PublicKey {
+        self.local_key
+    }
+
+    /// Returns this connection's fresh Hello nonce for the pairing ceremony.
+    #[must_use]
+    pub const fn local_nonce(&self) -> SessionNonce {
+        self.local_nonce
+    }
+
+    /// Returns the peer's fresh Hello nonce for the pairing ceremony.
+    #[must_use]
+    pub const fn peer_nonce(&self) -> SessionNonce {
+        self.peer_nonce
     }
 
     /// Returns the peer's negotiated Hello message.
@@ -249,6 +287,12 @@ impl FlowConnection {
         }
         self.trusted.store(true, Ordering::Release);
         Ok(())
+    }
+
+    /// Reverts an in-place pairing promotion when durable configuration could
+    /// not be committed. The connection is closed by the runtime afterwards.
+    pub fn revoke_pairing_promotion(&self) {
+        self.trusted.store(false, Ordering::Release);
     }
 
     /// Applies the simultaneous-dial tiebreak after the caller detects a race.
@@ -375,7 +419,11 @@ impl FlowConnection {
             )
             .await;
         }
-        Ok(RpcEvent::Request(IncomingRpc { request, send }))
+        Ok(RpcEvent::Request(IncomingRpc {
+            request,
+            send,
+            send_gate: self.send_gate.clone(),
+        }))
     }
 
     /// Sends one notification frame on its own unidirectional stream.
@@ -492,6 +540,7 @@ pub enum RpcEvent {
 pub struct IncomingRpc {
     request: Envelope,
     send: SendStream,
+    send_gate: SendGate,
 }
 
 /// The head of a validated response to `ClipboardFetch` or `FileFetch`.
@@ -557,6 +606,9 @@ impl IncomingRpc {
         if response.kind != FrameKind::Error && !expected.contains(&response.kind) {
             return Err(TransportError::UnexpectedResponse(response.kind));
         }
+        if !self.send_gate.may_send_kind(response.kind) {
+            return Err(TransportError::SendGated(response.kind));
+        }
         validate_payload(&response)?;
         response.write_to(&mut self.send).await?;
         self.send.finish()?;
@@ -573,6 +625,15 @@ impl IncomingRpc {
         if !is_bulk_request(self.request.kind) {
             return Err(TransportError::InvalidRequestKind(self.request.kind));
         }
+        let chunks = chunks.into_iter().collect::<Vec<_>>();
+        if !self.send_gate.may_send_kind(head.kind) {
+            return Err(TransportError::SendGated(head.kind));
+        }
+        for chunk in &chunks {
+            if !self.send_gate.may_send_kind(chunk.kind) {
+                return Err(TransportError::SendGated(chunk.kind));
+            }
+        }
         validate_sequence_frame(&head, FrameKind::ClipboardData)?;
         head.write_to(&mut self.send).await?;
         for chunk in chunks {
@@ -580,6 +641,9 @@ impl IncomingRpc {
             chunk.write_to(&mut self.send).await?;
         }
         validate_sequence_frame(&end, FrameKind::ChunkEnd)?;
+        if !self.send_gate.may_send_kind(end.kind) {
+            return Err(TransportError::SendGated(end.kind));
+        }
         end.write_to(&mut self.send).await?;
         self.send.finish()?;
         Ok(())

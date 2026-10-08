@@ -18,9 +18,9 @@ use openlogi_fixture::{
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, ClientKind,
-    ConfigReloadError, FlowStatus, ForegroundApps, Generation, Identity, InventoryHealth,
-    MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation,
+    ConfigReloadError, FlowCommandError, FlowLayout, FlowStatus, ForegroundApps, Generation,
+    Identity, InventoryHealth, MonitorEvent, Observation, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;
@@ -317,6 +317,46 @@ impl Agent for TestAgent {
             |settings| &settings.fn_lock,
             0x40a3,
         )
+    }
+
+    async fn flow_set_enabled(
+        self,
+        _: TarpcContext,
+        _enabled: bool,
+    ) -> Result<(), ConfigReloadError> {
+        unreachable!("profile capture does not change Flow")
+    }
+
+    async fn flow_pair_start(
+        self,
+        _: TarpcContext,
+        _address: String,
+    ) -> Result<(), FlowCommandError> {
+        unreachable!("profile capture does not pair Flow peers")
+    }
+
+    async fn flow_pair_listen(self, _: TarpcContext) -> Result<(), FlowCommandError> {
+        unreachable!("profile capture does not pair Flow peers")
+    }
+
+    async fn flow_pair_confirm(self, _: TarpcContext) -> Result<(), FlowCommandError> {
+        unreachable!("profile capture does not pair Flow peers")
+    }
+
+    async fn flow_pair_reject(self, _: TarpcContext) -> Result<(), FlowCommandError> {
+        unreachable!("profile capture does not pair Flow peers")
+    }
+
+    async fn flow_pair_cancel(self, _: TarpcContext) -> Result<(), FlowCommandError> {
+        unreachable!("profile capture does not pair Flow peers")
+    }
+
+    async fn flow_set_layout(
+        self,
+        _: TarpcContext,
+        _layout: Vec<FlowLayout>,
+    ) -> Result<(), ConfigReloadError> {
+        unreachable!("profile capture does not change Flow layout")
     }
 }
 

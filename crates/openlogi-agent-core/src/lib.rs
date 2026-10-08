@@ -23,3 +23,4 @@ pub mod runtime;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};
+pub use flow::FlowController;

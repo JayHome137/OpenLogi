@@ -131,6 +131,7 @@ impl AppState {
     pub fn request_accessibility_prompt(&self) {
         self.send_ipc(crate::services::ipc::RequestAccessibilityPrompt);
     }
+
     /// The agent connection state the render path branches on.
     #[must_use]
     pub fn agent_link(&self) -> &AgentLink {

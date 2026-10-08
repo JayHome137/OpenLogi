@@ -28,7 +28,7 @@ impl CompiledFlowConfig {
         let mut peer_keys = HashSet::new();
         let mut peers = Vec::with_capacity(config.peers.len());
         for peer in &config.peers {
-            if peer.name.is_empty() {
+            if peer.name.trim().is_empty() {
                 return Err(FlowConfigError::EmptyPeerName);
             }
             if !peer_names.insert(peer.name.clone()) {
@@ -107,6 +107,7 @@ impl CompiledFlowConfig {
                     state: FlowLinkState::Lost,
                 })
                 .collect(),
+            pairing: None,
         }
     }
 }
@@ -239,5 +240,22 @@ mod tests {
             CompiledFlowConfig::compile(&config).unwrap_err(),
             FlowConfigError::UnknownLayoutPeer("missing".into())
         );
+    }
+
+    #[test]
+    fn rejects_whitespace_only_peer_names() {
+        let config = FlowConfig {
+            peers: vec![FlowPeer {
+                name: " \t\n ".into(),
+                public_key: key("ab"),
+                addresses: Vec::new(),
+            }],
+            ..FlowConfig::default()
+        };
+
+        assert!(matches!(
+            CompiledFlowConfig::compile(&config),
+            Err(FlowConfigError::EmptyPeerName)
+        ));
     }
 }

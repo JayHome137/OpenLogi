@@ -12,11 +12,13 @@ use crate::{
 /// Default time for users to compare and confirm the pairing code.
 pub const DEFAULT_PAIRING_TIMEOUT: Duration = Duration::from_secs(120);
 
-/// Durable storage used when a pairing session becomes authenticated.
+/// Persistence boundary used when a pairing session becomes authenticated.
 pub trait PeerKeyStore {
-    /// Persists a newly authenticated peer key.
+    /// Records a newly authenticated peer key.
     ///
-    /// Implementations must durably commit the key before returning success.
+    /// An implementation may stage the key in a caller-owned transaction. The
+    /// caller must keep that transaction alive until the surrounding pairing
+    /// operation either commits or tears down the session.
     fn persist_peer_key(&mut self, key: PublicKey) -> Result<(), PersistPeerKeyError>;
 }
 
@@ -266,6 +268,36 @@ impl PairingSession {
         }
     }
 
+    /// Applies a successful peer outcome and records the peer key.
+    ///
+    /// The responder can report `PAIRED` in the response to our
+    /// `PairConfirm` before this side has received a second `PairConfirm`
+    /// request. This path is therefore distinct from [`Self::receive_outcome`]
+    /// and owns the missing persistence step.
+    pub fn receive_outcome_with_store(
+        &mut self,
+        outcome: &proto::PairOutcome,
+        store: &mut impl PeerKeyStore,
+    ) -> Result<(), PairingError> {
+        match outcome.result.as_known() {
+            Some(proto::PairResult::Paired) => {
+                if matches!(self.phase, Phase::Paired) {
+                    return Ok(());
+                }
+                let Phase::Prompted(prompted) = self.phase else {
+                    return Err(PairingError::InvalidTransition(self.state()));
+                };
+                if !prompted.local_confirmed {
+                    return Err(PairingError::InvalidTransition(self.state()));
+                }
+                store.persist_peer_key(self.peer_key)?;
+                self.terminal(Phase::Paired);
+                Ok(())
+            }
+            _ => self.receive_outcome(outcome),
+        }
+    }
+
     /// Rejects the local prompt and returns the terminal RPC outcome.
     pub fn reject(&mut self) -> Result<proto::PairOutcome, PairingError> {
         self.ensure_prompted()?;
@@ -410,6 +442,14 @@ mod tests {
         fn persist_peer_key(&mut self, key: PublicKey) -> Result<(), PersistPeerKeyError> {
             self.0.push(key);
             Ok(())
+        }
+    }
+
+    struct FailingStore;
+
+    impl PeerKeyStore for FailingStore {
+        fn persist_peer_key(&mut self, _key: PublicKey) -> Result<(), PersistPeerKeyError> {
+            Err(PersistPeerKeyError::new("test persistence failure"))
         }
     }
 
@@ -578,6 +618,48 @@ mod tests {
                 .result
                 .as_known(),
             Some(proto::PairResult::Rejected)
+        );
+        assert!(store.0.is_empty());
+    }
+
+    #[test]
+    fn persistence_failure_keeps_prompted_state_for_caller_cleanup() {
+        let now = Instant::now();
+        let mut session = session();
+        session.receive_start(now, None).unwrap();
+        session
+            .confirm_local(now, &mut MemoryStore::default())
+            .unwrap();
+
+        let error = session.receive_confirm(now, &mut FailingStore).unwrap_err();
+        assert!(matches!(error, PairingError::Persistence(_)));
+        assert!(matches!(
+            session.state(),
+            PairingState::Prompted {
+                local_confirmed: true,
+                peer_confirmed: true,
+                ..
+            }
+        ));
+        assert!(session.sas_code().is_some());
+    }
+
+    #[test]
+    fn paired_outcome_requires_local_confirmation() {
+        let now = Instant::now();
+        let mut session = session();
+        session.receive_start(now, None).unwrap();
+        let mut store = MemoryStore::default();
+        let error = session
+            .receive_outcome_with_store(&pair_outcome(proto::PairResult::Paired), &mut store)
+            .unwrap_err();
+        assert_eq!(
+            error,
+            PairingError::InvalidTransition(PairingState::Prompted {
+                timeout_ms: 120_000,
+                local_confirmed: false,
+                peer_confirmed: false,
+            })
         );
         assert!(store.0.is_empty());
     }

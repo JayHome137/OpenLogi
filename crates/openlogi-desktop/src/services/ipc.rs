@@ -74,6 +74,10 @@ pub use request::{
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 
 /// What the client thread tells the GPUI loop.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the complete agent snapshot is the state update; boxing it would add a heap allocation to every observation"
+)]
 pub enum GuiUpdate {
     /// The agent's state, as of a generation this client had not seen.
     Snapshot(AgentSnapshot),
@@ -257,6 +261,10 @@ async fn observe_loop(
 }
 
 /// Why [`observe_loop`] woke up.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the observe result carries the complete snapshot and only lives across one select iteration"
+)]
 enum Woken {
     /// The observe call answered, or its connection dropped.
     Observed(Result<Option<AgentSnapshot>, RpcError>),

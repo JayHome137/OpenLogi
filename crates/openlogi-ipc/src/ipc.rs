@@ -69,7 +69,8 @@ pub use succession::Identity;
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
 /// v35: `AgentSnapshot::flow` appended — configured Flow peers and their
 ///      coarse connection state.
-pub const PROTOCOL_VERSION: u32 = 35;
+/// v36: Flow pairing state and management RPCs appended.
+pub const PROTOCOL_VERSION: u32 = 36;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -161,6 +162,8 @@ pub struct FlowStatus {
     pub enabled: bool,
     /// Configured peers in config order.
     pub peers: Vec<FlowPeerStatus>,
+    /// The one in-progress Flow peer pairing ceremony, if any.
+    pub pairing: Option<FlowPairingPhase>,
 }
 
 /// One configured Flow peer's display identity and coarse link state.
@@ -185,6 +188,96 @@ pub enum FlowLinkState {
     Degraded,
     /// No established Flow connection exists.
     Lost,
+}
+
+/// State of the Flow peer pairing ceremony.
+///
+/// This is a state snapshot rather than a stream of events, so a GUI can
+/// reconnect or miss an observation and still render the current ceremony.
+/// Variants are append-only because this type crosses bincode IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowPairingPhase {
+    /// An address was accepted and the agent is establishing an unauthenticated
+    /// pairing connection.
+    Connecting { address: String },
+    /// Both peers can display the same short authentication string.
+    Prompted {
+        public_key: String,
+        machine_name: String,
+        sas: String,
+        local_confirmed: bool,
+        peer_confirmed: bool,
+    },
+    /// The ceremony completed and the peer key was persisted.
+    Paired { name: String, public_key: String },
+    /// The ceremony ended without adding a trusted peer.
+    Failed(FlowPairingFailure),
+}
+
+/// Typed terminal failure for a Flow peer pairing ceremony.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowPairingFailure {
+    /// The supplied address could not be resolved or dialed.
+    Connection { message: String },
+    /// A different Flow pairing session is already active.
+    AlreadyActive,
+    /// The command required an active pairing session.
+    NoActiveSession,
+    /// The Flow runtime is disabled or not ready.
+    Unavailable,
+    /// The user rejected the displayed authentication string.
+    Rejected,
+    /// The confirmation deadline expired.
+    Timeout,
+    /// The peer sent a malformed or unsupported pairing message.
+    Protocol { message: String },
+    /// The authenticated peer could not be persisted to config.toml.
+    Persistence { message: String },
+    /// The user cancelled the ceremony.
+    Cancelled,
+}
+
+/// Edge mapping accepted by the Flow layout management RPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlowLayout {
+    /// Local display edge.
+    pub edge: FlowEdge,
+    /// Configured peer name reached through that edge.
+    pub peer: String,
+}
+
+/// Screen edge names used by the Flow layout management RPC.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowEdge {
+    /// Left edge.
+    Left,
+    /// Right edge.
+    Right,
+    /// Top edge.
+    Top,
+    /// Bottom edge.
+    Bottom,
+}
+
+/// Immediate failure while accepting a Flow management command.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FlowCommandError {
+    /// Flow is disabled in config.
+    Disabled,
+    /// Another pairing ceremony is active.
+    AlreadyActive,
+    /// No pairing ceremony is active.
+    NoActiveSession,
+    /// The command's address or payload is invalid.
+    Invalid { message: String },
+    /// The peer connection failed before the ceremony started.
+    Connection { message: String },
+    /// The pairing protocol rejected the command.
+    Protocol { message: String },
+    /// The peer key or layout could not be persisted.
+    Persistence { message: String },
+    /// The Flow runtime is disabled, not armed, or no longer available.
+    Unavailable,
 }
 
 /// The application the agent currently resolves per-app profiles against, and
@@ -624,4 +717,18 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Enable or disable the Flow runtime and persist the setting.
+    async fn flow_set_enabled(enabled: bool) -> Result<(), ConfigReloadError>;
+    /// Start a Flow peer pairing ceremony against a hostname or IP address.
+    async fn flow_pair_start(address: String) -> Result<(), FlowCommandError>;
+    /// Open a one-shot inbound Flow pairing window for an unknown peer.
+    async fn flow_pair_listen() -> Result<(), FlowCommandError>;
+    /// Confirm the SAS displayed by the active Flow peer pairing ceremony.
+    async fn flow_pair_confirm() -> Result<(), FlowCommandError>;
+    /// Reject the SAS displayed by the active Flow peer pairing ceremony.
+    async fn flow_pair_reject() -> Result<(), FlowCommandError>;
+    /// Cancel the active Flow peer pairing ceremony.
+    async fn flow_pair_cancel() -> Result<(), FlowCommandError>;
+    /// Replace the local Flow screen-edge layout and persist it.
+    async fn flow_set_layout(layout: Vec<FlowLayout>) -> Result<(), ConfigReloadError>;
 }
