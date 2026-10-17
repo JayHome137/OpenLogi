@@ -194,7 +194,10 @@ impl FlowGeneration {
             Arc::clone(&endpoint),
             peers,
             provider,
-            SessionPolicy::default(),
+            SessionPolicy {
+                retry_max: PEER_RETRY_MAX,
+                ..SessionPolicy::default()
+            },
         )?;
         let pairing_connections = sessions
             .take_pairing_connections()
@@ -602,6 +605,12 @@ pub(super) struct GenerationState {
     pub(super) clipboard: Arc<ClipboardManager>,
     pairing_phase: RwLock<Option<openlogi_ipc::FlowPairingPhase>>,
 }
+
+/// Longest wait between attempts to reach a lost peer. A peer is a machine on
+/// the same desk: after it restarts or wakes, the link should be back within
+/// seconds, not after the session layer's 30 s default backoff ceiling. One
+/// QUIC handshake attempt every few seconds toward an absent peer costs nothing.
+const PEER_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Default)]
 struct RemotePeerState {
