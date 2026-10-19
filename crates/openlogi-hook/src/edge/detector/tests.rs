@@ -315,3 +315,37 @@ fn geometry_replacement_preserves_crossing_latch_until_rearm() {
             .is_some()
     );
 }
+
+#[test]
+fn suspend_and_side_changes_preserve_crossing_latch() {
+    let display = rect(0.0, 0.0, 100.0, 100.0);
+    let mut detector = EdgeDetector::new(
+        ExposedEdges::from_displays(&[display]),
+        ArmedSides::ALL,
+        dwell_params(),
+    );
+
+    assert!(detector.update(point(0.0, 50.0), Duration::ZERO).is_none());
+    assert!(
+        detector
+            .update(point(0.0, 50.0), Duration::from_millis(100))
+            .is_some()
+    );
+    detector.suspend();
+    detector.set_armed_sides(ArmedSides::from_sides([EdgeSide::Left, EdgeSide::Top]));
+    assert!(detector.is_latched());
+    // Still pinned to the crossed edge long after the cooldown: no retrigger.
+    for millis in [800, 1_000, 1_200] {
+        assert!(
+            detector
+                .update(point(0.0, 50.0), Duration::from_millis(millis))
+                .is_none()
+        );
+    }
+    assert!(
+        detector
+            .update(point(30.0, 50.0), Duration::from_millis(1_300))
+            .is_none()
+    );
+    assert!(!detector.is_latched());
+}

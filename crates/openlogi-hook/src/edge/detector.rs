@@ -147,6 +147,40 @@ impl EdgeDetector {
         self.contact = None;
     }
 
+    /// The exposed edges this detector currently tracks.
+    #[must_use]
+    pub const fn edges(&self) -> &ExposedEdges {
+        &self.edges
+    }
+
+    /// Replace the armed side set without touching the latch or cooldown.
+    ///
+    /// An in-progress contact on a side that is no longer armed is dropped.
+    pub fn set_armed_sides(&mut self, armed_sides: ArmedSides) {
+        if armed_sides != self.armed_sides {
+            self.armed_sides = armed_sides;
+            self.contact = None;
+        }
+    }
+
+    /// Forget the motion history while sampling is suspended (for example
+    /// while a required modifier is released).
+    ///
+    /// The next sample starts a fresh velocity estimate and contact, but the
+    /// latch and cooldown of a prior crossing are kept: a cursor still pinned
+    /// to the edge it just crossed must leave the hysteresis band first.
+    pub fn suspend(&mut self) {
+        self.previous = None;
+        self.contact = None;
+    }
+
+    /// Whether a prior crossing is still waiting for the cursor to leave the
+    /// hysteresis band.
+    #[must_use]
+    pub const fn is_latched(&self) -> bool {
+        self.latched
+    }
+
     /// Consume one cursor sample and return at most one crossing.
     ///
     /// At a corner, an existing contact remains selected. A new contact chooses

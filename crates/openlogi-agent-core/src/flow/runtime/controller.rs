@@ -6,7 +6,7 @@ use openlogi_core::config::{Config, FlowConfig};
 use openlogi_hid::ChannelPool;
 use openlogi_hook::CursorSample;
 use openlogi_hook::edge::{
-    ArmedSides, EdgeCrossing, EdgeDetector, EdgeDetectorParams, ExposedEdges,
+    ArmedSides, DisplayRect, EdgeCrossing, EdgeDetector, EdgeDetectorParams, ExposedEdges,
 };
 use openlogi_ipc::{FlowCommandError, FlowLinkState, FlowPeerStatus, FlowStatus};
 use tokio::sync::{mpsc, oneshot};
@@ -461,44 +461,98 @@ async fn run_edge_input(
     control: mpsc::UnboundedSender<Control>,
 ) {
     let epoch = Instant::now();
-    let mut detector = None;
-    let mut active_revision = u64::MAX;
-    let mut refreshed_at = Instant::now()
-        .checked_sub(GEOMETRY_REFRESH)
-        .unwrap_or_else(Instant::now);
+    let mut input = EdgeInput::default();
     while let Some(movement) = movement.recv().await {
         let current = settings.read().map_or_else(
             |_| edge_settings(&FlowConfig::default(), 0),
             |value| value.clone(),
         );
-        if !current.enabled || (current.require_modifier && !movement.cursor.control_down) {
-            detector = None;
-            continue;
-        }
-        let refresh = current.revision != active_revision
-            || Instant::now().duration_since(refreshed_at) >= GEOMETRY_REFRESH;
-        if refresh {
-            let displays = openlogi_hook::display_rects().unwrap_or_default();
-            detector = (!displays.is_empty()).then(|| {
-                EdgeDetector::new(
-                    ExposedEdges::from_displays(&displays),
-                    current.sides,
-                    EdgeDetectorParams::default(),
-                )
-            });
-            active_revision = current.revision;
-            refreshed_at = Instant::now();
-        }
-        let Some(detector) = detector.as_mut() else {
-            continue;
-        };
         let timestamp = movement
             .cursor
             .timestamp
             .checked_duration_since(epoch)
             .unwrap_or(Duration::ZERO);
-        if let Some(crossing) = detector.update(movement.cursor.position, timestamp) {
+        let crossing = input.sample(
+            &current,
+            &movement.cursor,
+            Instant::now(),
+            timestamp,
+            || openlogi_hook::display_rects().unwrap_or_default(),
+        );
+        if let Some(crossing) = crossing {
             let _ = control.send(Control::Crossing(crossing));
+        }
+    }
+}
+
+/// The edge detector plus its refresh bookkeeping.
+///
+/// One detector lives for as long as Flow edges stay enabled. Geometry and
+/// side changes are applied to it in place, so the latch left by a crossing
+/// survives the periodic geometry refresh and a released modifier; replacing
+/// the detector would let a cursor still pinned to the edge cross again.
+#[derive(Default)]
+struct EdgeInput {
+    detector: Option<EdgeDetector>,
+    active_revision: Option<u64>,
+    refreshed_at: Option<Instant>,
+}
+
+impl EdgeInput {
+    fn sample(
+        &mut self,
+        settings: &EdgeSettings,
+        cursor: &CursorSample,
+        now: Instant,
+        timestamp: Duration,
+        displays: impl FnOnce() -> Vec<DisplayRect>,
+    ) -> Option<EdgeCrossing> {
+        if !settings.enabled {
+            *self = Self::default();
+            return None;
+        }
+        if settings.require_modifier && !cursor.control_down {
+            if let Some(detector) = self.detector.as_mut() {
+                detector.suspend();
+            }
+            return None;
+        }
+        let refresh = self.detector.is_none()
+            || self.active_revision != Some(settings.revision)
+            || self
+                .refreshed_at
+                .is_none_or(|at| now.duration_since(at) >= GEOMETRY_REFRESH);
+        if refresh {
+            self.refresh(settings, &displays());
+            self.refreshed_at = Some(now);
+        }
+        self.detector
+            .as_mut()?
+            .update(cursor.position, timestamp)
+    }
+
+    fn refresh(&mut self, settings: &EdgeSettings, displays: &[DisplayRect]) {
+        self.active_revision = Some(settings.revision);
+        if displays.is_empty() {
+            // A failed display query keeps the last known geometry (and its
+            // latch) rather than dropping edge detection.
+            return;
+        }
+        let edges = ExposedEdges::from_displays(displays);
+        match self.detector.as_mut() {
+            Some(detector) => {
+                if detector.edges() != &edges {
+                    detector.set_edges(edges);
+                }
+                detector.set_armed_sides(settings.sides);
+            }
+            None => {
+                self.detector = Some(EdgeDetector::new(
+                    edges,
+                    settings.sides,
+                    EdgeDetectorParams::default(),
+                ));
+            }
         }
     }
 }
@@ -544,6 +598,82 @@ mod tests {
         assert!(!disabled.require_modifier);
         assert_eq!(disabled.sides, ArmedSides::NONE);
         assert_eq!(disabled.revision, 5);
+    }
+
+    fn sample_at(x: f64, control_down: bool) -> CursorSample {
+        CursorSample {
+            position: CursorPosition { x, y: 50.0 },
+            timestamp: Instant::now(),
+            control_down,
+        }
+    }
+
+    fn display() -> Vec<DisplayRect> {
+        vec![DisplayRect::new(0.0, 0.0, 100.0, 100.0).expect("valid display")]
+    }
+
+    /// Drives one `EdgeInput` with a fixed clock so the geometry refresh
+    /// interval can be crossed deterministically.
+    fn drive(
+        input: &mut EdgeInput,
+        settings: &EdgeSettings,
+        start: Instant,
+        millis: u64,
+        x: f64,
+        control_down: bool,
+    ) -> Option<EdgeCrossing> {
+        let offset = Duration::from_millis(millis);
+        input.sample(
+            settings,
+            &sample_at(x, control_down),
+            start + offset,
+            offset,
+            display,
+        )
+    }
+
+    #[test]
+    fn edge_latch_survives_geometry_refresh_while_pinned() {
+        let settings = edge_settings(&configured(true, false), 1);
+        let mut input = EdgeInput::default();
+        let start = Instant::now();
+        assert!(drive(&mut input, &settings, start, 0, 99.5, false).is_none());
+        assert!(drive(&mut input, &settings, start, 300, 99.5, false).is_some());
+        // Pinned to the right edge across several geometry refreshes.
+        for millis in [2_500, 5_000, 7_500] {
+            assert!(drive(&mut input, &settings, start, millis, 99.5, false).is_none());
+            assert!(drive(&mut input, &settings, start, millis + 300, 99.5, false).is_none());
+        }
+        // Leaving the hysteresis band rearms the edge.
+        assert!(drive(&mut input, &settings, start, 8_000, 50.0, false).is_none());
+        assert!(drive(&mut input, &settings, start, 8_100, 99.5, false).is_none());
+        assert!(drive(&mut input, &settings, start, 8_400, 99.5, false).is_some());
+    }
+
+    #[test]
+    fn edge_latch_survives_modifier_release_and_config_revision() {
+        let settings = edge_settings(&configured(true, true), 1);
+        let mut input = EdgeInput::default();
+        let start = Instant::now();
+        assert!(drive(&mut input, &settings, start, 0, 99.5, true).is_none());
+        assert!(drive(&mut input, &settings, start, 300, 99.5, true).is_some());
+        assert!(drive(&mut input, &settings, start, 400, 99.5, false).is_none());
+        let reloaded = edge_settings(&configured(true, true), 2);
+        for millis in [900, 1_200, 1_600] {
+            assert!(drive(&mut input, &reloaded, start, millis, 99.5, true).is_none());
+        }
+    }
+
+    #[test]
+    fn disabling_edges_drops_the_detector() {
+        let mut input = EdgeInput::default();
+        let start = Instant::now();
+        let enabled = edge_settings(&configured(true, false), 1);
+        assert!(drive(&mut input, &enabled, start, 0, 50.0, false).is_none());
+        assert!(input.detector.is_some());
+        let disabled = edge_settings(&FlowConfig::default(), 2);
+        assert!(drive(&mut input, &disabled, start, 100, 50.0, false).is_none());
+        assert!(input.detector.is_none());
     }
 
     #[tokio::test]
