@@ -2,6 +2,7 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::Duration;
 
+use openlogi_core::device::DeviceKind;
 use openlogi_flow::frame::{FrameKind, InboundRole, MAX_CHUNK_LEN};
 use openlogi_flow::generated as proto;
 use openlogi_flow::identity::same_device;
@@ -16,23 +17,35 @@ use tracing::{debug, info};
 
 use super::clipboard::{MAX_CLIPBOARD_BYTES, MAX_FILE_LIST_BYTES};
 use super::runtime::{GenerationState, Presence};
-use super::{RuntimeDevice, is_pointing_device};
+use super::{RuntimeDevice, is_pointing_category, is_pointing_device};
 
 /// How long a receiver waits for arrival evidence. A Bolt device reconnects
 /// within a second, but the receiver only sees it once its inventory picks
-/// the device up again, which on Windows took longer than three seconds.
-const ARM_TIMEOUT: Duration = Duration::from_secs(8);
+/// the device up again, which on Windows took longer than three seconds. A
+/// Bluetooth device has to reconnect to this host first, after which the OS
+/// may take 10-15 s to let its HID node open and the inventory then walks its
+/// feature table. The sender caps what it accepts at
+/// `sender::MAX_PEER_ARM_TIMEOUT`, which must stay above this.
+pub(super) const ARM_TIMEOUT: Duration = Duration::from_secs(30);
 const COMPLETED_LIMIT: usize = 64;
 
 mod sender;
 
 pub(super) use sender::start_outgoing;
 
-#[derive(Default)]
 pub(super) struct HandoffBook {
     incoming: Mutex<IncomingLedger>,
     outgoing: Mutex<HashMap<u64, OutgoingWaiter>>,
     sender_busy: std::sync::atomic::AtomicBool,
+    /// How long an accepted incoming transfer waits for its devices:
+    /// [`ARM_TIMEOUT`], shortened only by tests.
+    arm_timeout: Duration,
+}
+
+impl Default for HandoffBook {
+    fn default() -> Self {
+        Self::with_arm_timeout(ARM_TIMEOUT)
+    }
 }
 
 #[derive(Default)]
@@ -84,6 +97,15 @@ enum ArmDecision {
 }
 
 impl HandoffBook {
+    pub(super) fn with_arm_timeout(arm_timeout: Duration) -> Self {
+        Self {
+            incoming: Mutex::default(),
+            outgoing: Mutex::default(),
+            sender_busy: std::sync::atomic::AtomicBool::new(false),
+            arm_timeout,
+        }
+    }
+
     #[cfg(test)]
     pub(super) async fn has_outgoing(&self) -> bool {
         !self.outgoing.lock().await.is_empty()
@@ -153,7 +175,7 @@ impl HandoffBook {
         let mut superseded: &[PendingDevice] = &[];
         if let Some(pending) = &ledger.pending {
             if pending.peer == peer && pending.transfer_id == request.transfer_id {
-                return ArmDecision::Duplicate(accept(request.transfer_id));
+                return ArmDecision::Duplicate(accept(request.transfer_id, self.arm_timeout));
             }
             // A sender runs one handoff at a time, so a new transfer from the
             // peer that armed the pending one means it gave that one up: its
@@ -200,7 +222,13 @@ impl HandoffBook {
             matched.push(PendingDevice {
                 key: local.snapshot.config_key.clone(),
                 identity: local.identity.clone(),
-                pointing: is_pointing_device(local.snapshot.kind),
+                // A device never seen here (a Bluetooth device that has only
+                // been on the peer) has no kind yet: go by the sender's.
+                pointing: if local.snapshot.kind == DeviceKind::Unknown {
+                    is_pointing_category(requested)
+                } else {
+                    is_pointing_device(local.snapshot.kind)
+                },
                 arrived_at: None,
             });
         }
@@ -212,7 +240,7 @@ impl HandoffBook {
             devices: matched,
             accepted_at: None,
         });
-        ArmDecision::New(accept(request.transfer_id))
+        ArmDecision::New(accept(request.transfer_id, self.arm_timeout))
     }
 
     async fn mark_accepted(&self, peer: PublicKey, transfer_id: u64) -> bool {
@@ -248,7 +276,12 @@ impl HandoffBook {
             .iter()
             .all(|device| device.arrived_at.is_some())
         {
-            return Some(complete_pending(&mut ledger, accepted, false));
+            return Some(complete_pending(
+                &mut ledger,
+                accepted,
+                false,
+                self.arm_timeout,
+            ));
         }
         None
     }
@@ -260,7 +293,12 @@ impl HandoffBook {
             return None;
         }
         let accepted = pending.accepted_at?;
-        Some(complete_pending(&mut ledger, accepted, true))
+        Some(complete_pending(
+            &mut ledger,
+            accepted,
+            true,
+            self.arm_timeout,
+        ))
     }
 
     async fn cancel_unaccepted(&self, peer: PublicKey, transfer_id: u64) -> bool {
@@ -315,7 +353,12 @@ impl HandoffBook {
         for device in &mut pending.devices {
             device.arrived_at.get_or_insert(now);
         }
-        Some(complete_pending(&mut ledger, accepted, false))
+        Some(complete_pending(
+            &mut ledger,
+            accepted,
+            false,
+            self.arm_timeout,
+        ))
     }
 
     /// Where the pointer enters for the pending `transfer_id`, when it moves a
@@ -668,7 +711,7 @@ async fn accept_pending(state: Arc<GenerationState>, peer: PublicKey, transfer_i
 
 fn spawn_arm_timeout(state: Arc<GenerationState>, peer: PublicKey, transfer_id: u64) {
     tokio::spawn(async move {
-        tokio::time::sleep(ARM_TIMEOUT).await;
+        tokio::time::sleep(state.handoffs.arm_timeout).await;
         if let Some(completed) = state.handoffs.expire(peer, transfer_id).await {
             finish_incoming(state, completed).await;
         }
@@ -1055,6 +1098,7 @@ fn complete_pending(
     ledger: &mut IncomingLedger,
     accepted_at: Instant,
     timed_out: bool,
+    arm_timeout: Duration,
 ) -> CompletedTransfer {
     let pending = ledger
         .pending
@@ -1097,7 +1141,7 @@ fn complete_pending(
         ..Default::default()
     };
     let completed = CompletedIncoming {
-        accept: accept(pending.transfer_id),
+        accept: accept(pending.transfer_id, arm_timeout),
         result: result.clone(),
     };
     let key = (pending.peer, pending.transfer_id);
@@ -1115,11 +1159,10 @@ fn complete_pending(
     }
 }
 
-fn accept(transfer_id: u64) -> proto::HandoffAccept {
+fn accept(transfer_id: u64, arm_timeout: Duration) -> proto::HandoffAccept {
     proto::HandoffAccept {
         transfer_id,
-        arm_timeout_ms: u32::try_from(ARM_TIMEOUT.as_millis())
-            .unwrap_or_else(|_| unreachable!("eight seconds fits in u32 milliseconds")),
+        arm_timeout_ms: u32::try_from(arm_timeout.as_millis()).unwrap_or(u32::MAX),
         ..Default::default()
     }
 }
