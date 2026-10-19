@@ -20,6 +20,10 @@
 #     names, so the build tracks this repository rather than the SDK's cadence.
 #   - llvm20, because openlogi-camera pulls v4l2-sys-mit, whose build script
 #     runs bindgen and dlopens libclang. The base SDK ships none.
+#   - protoc, because openlogi-flow generates its wire types from protobuf at
+#     build time and the base SDK ships no protobuf compiler. The upstream
+#     release binary is pinned by checksum, unpacked into the build directory
+#     only, and never installed into /app.
 #
 # Local build, from the repository root:
 #   flatpak-builder --user --install --force-clean \
@@ -76,6 +80,8 @@ modules:
         RUSTUP_HOME: /run/build/openlogi/rustup
         # Where bindgen looks for libclang (v4l2-sys-mit's build script).
         LIBCLANG_PATH: /usr/lib/sdk/llvm20/lib
+        # buffa-build (openlogi-flow's build script) runs this protoc.
+        PROTOC: /run/build/openlogi/protoc/bin/protoc
         # The GPUI crates are the long pole; debug info is dead weight here.
         CARGO_PROFILE_RELEASE_DEBUG: 'false'
     build-commands:
@@ -83,6 +89,9 @@ modules:
       # of truth, and rustup installs exactly what it names.
       - curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs
           | sh -s -- -y --profile minimal --no-modify-path
+
+      # The zip's mode bits survive most extractors, but not all of them.
+      - chmod +x protoc/bin/protoc
 
       - cargo build --release --locked
           -p openlogi -p openlogi-desktop -p openlogi-overlay -p openlogi-agent
@@ -125,6 +134,20 @@ modules:
       - install -Dm644 LICENSE-APACHE /app/share/licenses/openlogi/LICENSE-APACHE
       - install -Dm644 LICENSE-MIT    /app/share/licenses/openlogi/LICENSE-MIT
     sources:
+      # protoc for openlogi-flow's build script; see the header. Same version
+      # the CI workflows install.
+      - type: archive
+        only-arches: [x86_64]
+        url: https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-x86_64.zip
+        sha256: 3e866620c5be27664f3d2fa2d656b5f3e09b5152b42f1bedbf427b333e90021a
+        dest: protoc
+        strip-components: 0
+      - type: archive
+        only-arches: [aarch64]
+        url: https://github.com/protocolbuffers/protobuf/releases/download/v29.3/protoc-29.3-linux-aarch_64.zip
+        sha256: 6427349140e01f06e049e707a58709a4f221ae73ab9a0425bc4a00c8d0e1ab32
+        dest: protoc
+        strip-components: 0
       # The checkout itself, so a release build is exactly the tagged tree and a
       # local build is exactly the working tree. `target` is skipped because a
       # host build tree is both useless in the sandbox and large enough to slow
