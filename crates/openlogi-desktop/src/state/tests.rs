@@ -55,6 +55,7 @@ pub(crate) mod device_list;
 mod device_names;
 mod dpi;
 mod easy_switch;
+mod flow;
 mod fn_lock;
 mod light_adoption;
 mod lighting;

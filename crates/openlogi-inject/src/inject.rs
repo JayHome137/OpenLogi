@@ -363,6 +363,21 @@ pub fn warp_cursor(x: f64, y: f64) -> bool {
     }
 }
 
+/// Release the modifier keys (Shift, Ctrl, Alt, Windows) the system still
+/// believes are held, and return how many there were.
+///
+/// A keyboard that switches to another computer while a modifier is down
+/// (Ctrl held to cross a screen edge, say) never sends its release here, which
+/// leaves the modifier stuck on this computer. Windows only for now; elsewhere
+/// this releases nothing.
+#[must_use]
+pub fn release_stuck_modifiers() -> usize {
+    cfg_select! {
+        target_os = "windows" => { windows::release_stuck_modifiers() }
+        _ => { 0 }
+    }
+}
+
 /// One synthetic held chord, released exactly once when dropped.
 ///
 /// Keep this value with the physical press lifecycle. Replacing its chord

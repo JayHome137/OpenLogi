@@ -701,6 +701,18 @@ pub fn message_envelope(
     Envelope::new(kind, 0, payload).map_err(TransportError::from)
 }
 
+impl TransportError {
+    /// Whether the connection itself is gone, not just one stream on it:
+    /// nothing more can be accepted on it.
+    #[must_use]
+    pub const fn is_connection_lost(&self) -> bool {
+        matches!(
+            self,
+            Self::Connection(_) | Self::Read(quinn::ReadError::ConnectionLost(_))
+        )
+    }
+}
+
 /// Builds the generated generic error payload used in an RPC response position.
 pub fn error_envelope(
     code: proto::ErrorCode,
@@ -1036,4 +1048,21 @@ fn dual_stack_socket(port: u16) -> io::Result<UdpSocket> {
     socket.set_only_v6(false)?;
     socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
     Ok(socket.into())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_a_lost_connection_counts_as_connection_lost() {
+        let closed = quinn::ConnectionError::LocallyClosed;
+        assert!(TransportError::Connection(closed.clone()).is_connection_lost());
+        assert!(
+            TransportError::Read(quinn::ReadError::ConnectionLost(closed)).is_connection_lost()
+        );
+        assert!(!TransportError::Read(quinn::ReadError::ClosedStream).is_connection_lost());
+        assert!(!TransportError::TrailingStreamData.is_connection_lost());
+        assert!(!TransportError::InvalidControlFrame.is_connection_lost());
+    }
 }

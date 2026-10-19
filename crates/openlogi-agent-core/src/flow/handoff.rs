@@ -12,13 +12,16 @@ use openlogi_flow::transport::{
 use sha2::{Digest, Sha256};
 use tokio::sync::{Mutex, oneshot};
 use tokio::time::Instant;
-use tracing::debug;
+use tracing::{debug, info};
 
 use super::clipboard::{MAX_CLIPBOARD_BYTES, MAX_FILE_LIST_BYTES};
-use super::runtime::GenerationState;
+use super::runtime::{GenerationState, Presence};
 use super::{RuntimeDevice, is_pointing_device};
 
-const ARM_TIMEOUT: Duration = Duration::from_secs(3);
+/// How long a receiver waits for arrival evidence. A Bolt device reconnects
+/// within a second, but the receiver only sees it once its inventory picks
+/// the device up again, which on Windows took longer than three seconds.
+const ARM_TIMEOUT: Duration = Duration::from_secs(8);
 const COMPLETED_LIMIT: usize = 64;
 
 mod sender;
@@ -145,14 +148,24 @@ impl HandoffBook {
                 result: completed.result.clone(),
             };
         }
+        // Devices of a transfer the same peer gave up that never arrived: the
+        // caller's view counts them online only on that transfer's say-so.
+        let mut superseded: &[PendingDevice] = &[];
         if let Some(pending) = &ledger.pending {
             if pending.peer == peer && pending.transfer_id == request.transfer_id {
                 return ArmDecision::Duplicate(accept(request.transfer_id));
             }
-            return reject(
-                proto::HandoffRejectReason::AlreadyPending,
-                "another transfer is already armed",
-            );
+            // A sender runs one handoff at a time, so a new transfer from the
+            // peer that armed the pending one means it gave that one up: its
+            // request timed out, say, or its switch failed and the cancel was
+            // lost. Only another peer's transfer still blocks this one.
+            if pending.peer != peer {
+                return reject(
+                    proto::HandoffRejectReason::AlreadyPending,
+                    "another transfer is already armed",
+                );
+            }
+            superseded = &pending.devices;
         }
 
         let mut matched = Vec::with_capacity(request.devices.len());
@@ -166,7 +179,10 @@ impl HandoffBook {
                     "a requested device is not configured locally",
                 );
             };
-            if local.snapshot.online {
+            let assumed = superseded.iter().any(|device| {
+                device.arrived_at.is_none() && device.key == local.snapshot.config_key
+            });
+            if local.snapshot.online && !assumed {
                 return reject(
                     proto::HandoffRejectReason::NotReady,
                     "a requested device is already online on the receiver",
@@ -261,18 +277,57 @@ impl HandoffBook {
         }
     }
 
-    async fn cancel_incoming(&self, peer: PublicKey, transfer_id: u64) -> bool {
+    /// Drop the pending `transfer_id`, returning the config keys of its
+    /// devices that never arrived; `None` when it is not the pending one.
+    async fn cancel_incoming(&self, peer: PublicKey, transfer_id: u64) -> Option<Vec<String>> {
         let mut ledger = self.incoming.lock().await;
-        if ledger
+        let pending = ledger
+            .pending
+            .take_if(|pending| pending.peer == peer && pending.transfer_id == transfer_id)?;
+        Some(missing_keys(&pending.devices))
+    }
+
+    /// Config keys of the devices the pending `transfer_id` brings here.
+    async fn pending_keys(&self, peer: PublicKey, transfer_id: u64) -> Vec<String> {
+        let ledger = self.incoming.lock().await;
+        ledger
             .pending
             .as_ref()
-            .is_some_and(|pending| pending.peer == peer && pending.transfer_id == transfer_id)
-        {
-            ledger.pending = None;
-            true
-        } else {
-            false
+            .filter(|pending| pending.peer == peer && pending.transfer_id == transfer_id)
+            .map(|pending| {
+                pending
+                    .devices
+                    .iter()
+                    .map(|device| device.key.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Settle the pending accepted incoming transfer as arrived: this machine
+    /// is sending the devices on, which it can only do once they are here,
+    /// however far behind the inventory is.
+    async fn complete_on_departure(&self) -> Option<CompletedTransfer> {
+        let mut ledger = self.incoming.lock().await;
+        let pending = ledger.pending.as_mut()?;
+        let accepted = pending.accepted_at?;
+        let now = Instant::now();
+        for device in &mut pending.devices {
+            device.arrived_at.get_or_insert(now);
         }
+        Some(complete_pending(&mut ledger, accepted, false))
+    }
+
+    /// Where the pointer enters for the pending `transfer_id`, when it moves a
+    /// pointing device.
+    async fn pointer_entry(&self, peer: PublicKey, transfer_id: u64) -> Option<proto::EntryPoint> {
+        let ledger = self.incoming.lock().await;
+        ledger
+            .pending
+            .as_ref()
+            .filter(|pending| pending.peer == peer && pending.transfer_id == transfer_id)
+            .filter(|pending| pending.devices.iter().any(|device| device.pointing))
+            .map(|pending| pending.entry.clone())
     }
 
     async fn register_outgoing(
@@ -387,10 +442,7 @@ pub(super) async fn handle_rpc(state: Arc<GenerationState>, peer: PublicKey, eve
     else {
         return;
     };
-    let devices = state
-        .devices
-        .read()
-        .map_or_else(|_| Vec::new(), |guard| guard.clone());
+    let devices = state.effective_devices();
     let decision = state
         .handoffs
         .arm(
@@ -579,19 +631,36 @@ async fn accept_pending(state: Arc<GenerationState>, peer: PublicKey, transfer_i
     let completed = {
         let _lifecycle = state.lifecycle.lock().await;
         if !state.is_active() {
-            state.handoffs.cancel_incoming(peer, transfer_id).await;
+            if let Some(missing) = state.handoffs.cancel_incoming(peer, transfer_id).await {
+                state.forget_arrival(&missing);
+            }
             state
                 .send_cancel(peer, transfer_id, proto::HandoffCancelReason::Shutdown)
                 .await;
             return;
         }
         if state.handoffs.mark_accepted(peer, transfer_id).await {
+            // Place the pointer as soon as the sender is committed to switching,
+            // not once arrival is proven: the inventory can take seconds to see
+            // the device, and meanwhile the user is moving the mouse from
+            // wherever this screen's pointer last was.
+            if let Some(entry) = state.handoffs.pointer_entry(peer, transfer_id).await {
+                super::runtime::warp_entry(&entry);
+            }
+            let keys = state.handoffs.pending_keys(peer, transfer_id).await;
+            state.note_presence(keys.iter().map(String::as_str), Presence::Arrived);
             spawn_arm_timeout(Arc::clone(&state), peer, transfer_id);
-            state.handoffs.observe(&state.devices_snapshot()).await
+            Some(state.handoffs.observe(&state.devices_snapshot()).await)
         } else {
             None
         }
     };
+    let Some(completed) = completed else {
+        return;
+    };
+    // Peers now see these devices as here, so a quick crossing back is not
+    // refused while this machine's inventory catches up.
+    state.publish_device_state().await;
     if let Some(completed) = completed {
         finish_incoming(state, completed).await;
     }
@@ -613,6 +682,11 @@ pub(super) async fn inventory_changed(state: Arc<GenerationState>) {
 }
 
 async fn finish_incoming(state: Arc<GenerationState>, completed: CompletedTransfer) {
+    // Accepting assumed every device here; the ones that timed out are not.
+    if !completed.missing.is_empty() {
+        state.forget_arrival(&completed.missing);
+        state.publish_device_state().await;
+    }
     let _lifecycle = state.lifecycle.lock().await;
     if !state.is_active() {
         state
@@ -624,9 +698,18 @@ async fn finish_incoming(state: Arc<GenerationState>, completed: CompletedTransf
             .await;
         return;
     }
-    if completed.warp_pointer {
-        super::runtime::warp_entry(&completed.entry);
-    }
+    info!(
+        transfer_id = completed.result.transfer_id,
+        outcome = completed.result.outcome.to_i32(),
+        arrived = completed
+            .result
+            .arrivals
+            .iter()
+            .filter(|arrival| arrival.arrived)
+            .count(),
+        requested = completed.result.arrivals.len(),
+        "Flow incoming handoff finished"
+    );
     state.send_result(completed.peer, completed.result).await;
 }
 
@@ -679,6 +762,13 @@ pub(super) async fn handle_notification(
                 .handoffs
                 .cancel_incoming(peer, cancel.transfer_id)
                 .await;
+            // The sender's switch failed: what accepting assumed arrived did
+            // not, and must not block its retry as "already online".
+            if let Some(missing) = &incoming {
+                state.forget_arrival(missing);
+                state.publish_device_state().await;
+            }
+            let incoming = incoming.is_some();
             let outgoing = state
                 .handoffs
                 .cancel_outgoing(peer, cancel.transfer_id)
@@ -948,9 +1038,17 @@ async fn read_bulk_response(
 
 struct CompletedTransfer {
     peer: PublicKey,
-    entry: proto::EntryPoint,
     result: proto::HandoffResult,
-    warp_pointer: bool,
+    /// Config keys of the devices that never arrived.
+    missing: Vec<String>,
+}
+
+fn missing_keys(devices: &[PendingDevice]) -> Vec<String> {
+    devices
+        .iter()
+        .filter(|device| device.arrived_at.is_none())
+        .map(|device| device.key.clone())
+        .collect()
 }
 
 fn complete_pending(
@@ -1012,12 +1110,8 @@ fn complete_pending(
     }
     CompletedTransfer {
         peer: pending.peer,
-        entry: pending.entry,
         result,
-        warp_pointer: pending
-            .devices
-            .iter()
-            .any(|device| device.pointing && device.arrived_at.is_some()),
+        missing: missing_keys(&pending.devices),
     }
 }
 
@@ -1025,7 +1119,7 @@ fn accept(transfer_id: u64) -> proto::HandoffAccept {
     proto::HandoffAccept {
         transfer_id,
         arm_timeout_ms: u32::try_from(ARM_TIMEOUT.as_millis())
-            .unwrap_or_else(|_| unreachable!("three seconds fits in u32 milliseconds")),
+            .unwrap_or_else(|_| unreachable!("eight seconds fits in u32 milliseconds")),
         ..Default::default()
     }
 }

@@ -1,4 +1,4 @@
-//! App-level settings (launch-at-login, theme, assets, language).
+//! App-level settings (launch-at-login, theme, assets, language, Flow).
 
 use super::device_key::DeviceKey;
 use super::events::StateEvents;
@@ -6,8 +6,8 @@ use super::{AppState, StateEvent};
 use crate::platform::app_icon::AppIconExt as _;
 use gpui_component::ThemeMode;
 use openlogi_core::config::{
-    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, MouseProfileTarget,
-    ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
+    AppIcon, AppSettings, Appearance, AssetSourcePreference, DeviceViewMode, FlowConfig, FlowEdge,
+    FlowLayout, MouseProfileTarget, ThumbwheelSensitivity, UiScale, VerticalScrollSensitivity,
 };
 
 impl AppState {
@@ -375,5 +375,90 @@ impl AppState {
         self.persist_and_reload("language setting");
         openlogi_core::locale::activate(self.config.app_settings.language.as_deref());
         StateEvents::from(StateEvent::LanguageChanged).and(StateEvent::SettingsChanged)
+    }
+    /// The `[flow]` section behind the Settings window's Flow page. Read-only
+    /// view; mutate via the `commit_flow_*` methods below.
+    #[must_use]
+    pub fn flow_config(&self) -> &FlowConfig {
+        &self.config.flow
+    }
+    /// Choose whether crossing a Flow screen edge also needs Control held, and
+    /// persist it. The agent's edge watcher applies it on reload without
+    /// reconnecting to peers. An already-set value writes nothing; failed saves
+    /// restore the previous choice.
+    pub fn commit_flow_require_modifier(&mut self, required: bool) -> StateEvents {
+        if self.config.flow.require_modifier == required {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config
+            .edit(|config| config.flow.require_modifier = required);
+        self.persist_and_reload("Flow edge modifier");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Toggle sharing copied text with Flow peers and persist it. The agent
+    /// restarts its Flow sessions on reload to apply it. An already-set value
+    /// writes nothing; failed saves restore the previous value.
+    pub fn commit_flow_clipboard(&mut self, enabled: bool) -> StateEvents {
+        if self.config.flow.clipboard == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config.edit(|config| config.flow.clipboard = enabled);
+        self.persist_and_reload("Flow clipboard sharing");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Turn Flow on or off and persist it. The agent arms or stops its Flow
+    /// runtime on reload. An already-set value writes nothing; failed saves
+    /// restore the previous value.
+    pub fn commit_flow_enabled(&mut self, enabled: bool) -> StateEvents {
+        if self.config.flow.enabled == enabled {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config.edit(|config| config.flow.enabled = enabled);
+        self.persist_and_reload("Flow");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Place a paired computer past one of this screen's edges, or nowhere
+    /// (`None`), and persist it. A computer already on that edge gives it up:
+    /// one edge leads to one computer. The agent re-maps its edges on reload
+    /// without reconnecting.
+    pub fn commit_flow_peer_edge(&mut self, peer: &str, edge: Option<FlowEdge>) -> StateEvents {
+        let current = self
+            .config
+            .flow
+            .layout
+            .iter()
+            .find(|layout| layout.peer == peer)
+            .map(|layout| layout.edge);
+        if current == edge
+            || !self
+                .config
+                .flow
+                .peers
+                .iter()
+                .any(|known| known.name == peer)
+        {
+            return StateEvent::SettingsChanged.into();
+        }
+        self.config.edit(|config| {
+            let layout = &mut config.flow.layout;
+            layout.retain(|placed| placed.peer != peer && Some(placed.edge) != edge);
+            if let Some(edge) = edge {
+                layout.push(FlowLayout {
+                    edge,
+                    peer: peer.to_owned(),
+                });
+            }
+        });
+        self.persist_and_reload("Flow layout");
+        StateEvent::SettingsChanged.into()
+    }
+    /// Take in a `[flow]` section another writer (the agent, after pairing)
+    /// saved to `config.toml`, so later saves here do not conflict with it.
+    pub fn adopt_flow_from_disk(&mut self) -> StateEvents {
+        if self.config.adopt_flow_from_disk() {
+            StateEvent::SettingsChanged.into()
+        } else {
+            StateEvents::default()
+        }
     }
 }

@@ -22,7 +22,8 @@ use openlogi_core::hid::{
     LightCommand, ReceiverSelector, ReportRate, ReportRateInfo, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::{
-    AgentClient, ChosenLight, ConfigReloadError, PairingCommandError, PairingFailure, SavedConfig,
+    AgentClient, ChosenLight, ConfigReloadError, FlowCommandError, PairingCommandError,
+    PairingFailure, SavedConfig,
 };
 use tarpc::client::RpcError;
 use tarpc::context;
@@ -626,6 +627,103 @@ impl Request for CancelPairing {
     }
 }
 
+/// A Flow pairing command the agent refused, or never received, starts no
+/// ceremony, so the observed [`openlogi_ipc::FlowStatus`] never explains it:
+/// report it to the Flow settings page instead.
+fn report_flow_refusal(
+    updates: &UpdateSender,
+    outcome: Result<Result<(), FlowCommandError>, Unavailable>,
+) {
+    let refusal = match outcome {
+        Ok(Ok(())) => return,
+        Ok(Err(refused)) => refused,
+        Err(Unavailable) => FlowCommandError::Unavailable,
+    };
+    let _ = updates.send(GuiUpdate::FlowCommandRefused(refusal));
+}
+
+/// Dial a Flow peer by host name or address and begin the SAS ceremony.
+pub struct FlowPairStart {
+    pub address: String,
+}
+
+impl Request for FlowPairStart {
+    type Answer = Result<(), FlowCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client
+            .flow_pair_start(context::current(), self.address.clone())
+            .await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_refusal(updates, outcome);
+    }
+}
+
+/// Wait for one inbound Flow pairing connection.
+pub struct FlowPairListen;
+
+impl Request for FlowPairListen {
+    type Answer = Result<(), FlowCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.flow_pair_listen(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_refusal(updates, outcome);
+    }
+}
+
+/// Confirm that both computers show the same Flow pairing code.
+pub struct FlowPairConfirm;
+
+impl Request for FlowPairConfirm {
+    type Answer = Result<(), FlowCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.flow_pair_confirm(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_refusal(updates, outcome);
+    }
+}
+
+/// Reject a Flow pairing code that differs between the computers.
+pub struct FlowPairReject;
+
+impl Request for FlowPairReject {
+    type Answer = Result<(), FlowCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.flow_pair_reject(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        report_flow_refusal(updates, outcome);
+    }
+}
+
+/// End the Flow pairing ceremony. A session that already ended needs no
+/// report: the observed state shows it.
+pub struct FlowPairCancel;
+
+impl Request for FlowPairCancel {
+    type Answer = Result<(), FlowCommandError>;
+
+    async fn call(&self, client: &AgentClient) -> Result<Self::Answer, RpcError> {
+        client.flow_pair_cancel(context::current()).await
+    }
+
+    fn deliver(self, outcome: Result<Self::Answer, Unavailable>, updates: &UpdateSender) {
+        if !matches!(outcome, Ok(Err(FlowCommandError::NoActiveSession))) {
+            report_flow_refusal(updates, outcome);
+        }
+    }
+}
+
 /// Remove one pairing from its receiver, answered as
 /// [`GuiUpdate::DeviceUnpaired`] so local state changes only once the
 /// receiver has let the pairing go.
@@ -738,6 +836,11 @@ commands! {
     PairDevice,
     CancelPairing,
     UnpairDevice,
+    FlowPairStart,
+    FlowPairListen,
+    FlowPairConfirm,
+    FlowPairReject,
+    FlowPairCancel,
     #[cfg(all(target_os = "macos", debug_assertions))]
     PollEventMonitor,
 }

@@ -68,10 +68,11 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts,
-    ReadFnLock, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
-    RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower,
-    SetLighting, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
+    CancelPairing, Command, FlowPairCancel, FlowPairConfirm, FlowPairListen, FlowPairReject,
+    FlowPairStart, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
+    ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
+    SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower, SetLighting, SetReportRate,
+    SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -161,6 +162,9 @@ pub enum GuiUpdate {
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
+    /// A Flow pairing command the agent refused or never received; no
+    /// ceremony in the observed state explains it.
+    FlowCommandRefused(openlogi_ipc::FlowCommandError),
     /// Whether the receiver let a pairing go. Answers [`UnpairDevice`].
     DeviceUnpaired {
         /// The pairing the receiver was asked to drop.

@@ -194,7 +194,10 @@ impl FlowGeneration {
             Arc::clone(&endpoint),
             peers,
             provider,
-            SessionPolicy::default(),
+            SessionPolicy {
+                retry_max: PEER_RETRY_MAX,
+                ..SessionPolicy::default()
+            },
         )?;
         let pairing_connections = sessions
             .take_pairing_connections()
@@ -601,7 +604,34 @@ pub(super) struct GenerationState {
     pub(super) handoffs: HandoffBook,
     pub(super) clipboard: Arc<ClipboardManager>,
     pairing_phase: RwLock<Option<openlogi_ipc::FlowPairingPhase>>,
+    /// Where Flow itself last moved each device, by config key, and when.
+    presence: std::sync::Mutex<HashMap<String, (Presence, std::time::Instant)>>,
 }
+
+/// What Flow knows first-hand about a device's whereabouts.
+///
+/// The inventory takes seconds (3-9 s over a Bolt receiver on Windows) to
+/// notice a device arriving or leaving. Flow moved it, so for a while its own
+/// record is the better one: without it a device that just arrived cannot be
+/// sent on ("no online devices"), a peer's request for one that just left is
+/// refused as "already online", and this machine keeps announcing a device it
+/// no longer has, which the peer's sender reads as "still held".
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum Presence {
+    /// A handoff to this machine was accepted for the device.
+    Arrived,
+    /// This machine switched the device to a peer.
+    Departed,
+}
+
+/// How long Flow's own record outranks the inventory.
+const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Longest wait between attempts to reach a lost peer. A peer is a machine on
+/// the same desk: after it restarts or wakes, the link should be back within
+/// seconds, not after the session layer's 30 s default backoff ceiling. One
+/// QUIC handshake attempt every few seconds toward an absent peer costs nothing.
+const PEER_RETRY_MAX: std::time::Duration = std::time::Duration::from_secs(5);
 
 #[derive(Clone, Default)]
 struct RemotePeerState {
@@ -613,6 +643,9 @@ struct RemotePeerState {
 
 #[derive(Clone)]
 pub(super) struct OutgoingDevice {
+    pub(super) key: String,
+    /// A mouse or other pointing device; anything else may carry held keys.
+    pub(super) pointing: bool,
     route: DeviceRoute,
     host: u8,
     pub(super) identity: proto::DeviceIdentity,
@@ -647,7 +680,66 @@ impl GenerationState {
             handoffs: HandoffBook::default(),
             clipboard,
             pairing_phase: RwLock::new(None),
+            presence: std::sync::Mutex::new(HashMap::new()),
         }
+    }
+
+    /// Record that Flow moved the devices with these config keys. Bumps the
+    /// announced revisions: the corrected view is new state for peers.
+    pub(super) fn note_presence<'a>(
+        &self,
+        keys: impl IntoIterator<Item = &'a str>,
+        presence: Presence,
+    ) {
+        if let Ok(mut record) = self.presence.lock() {
+            let now = std::time::Instant::now();
+            for key in keys {
+                record.insert(key.to_owned(), (presence, now));
+            }
+        }
+        self.device_revision.fetch_add(1, Ordering::Relaxed);
+        self.peer_revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Drop the arrival an accepted handoff assumed for these config keys: the
+    /// devices never came.
+    pub(super) fn forget_arrival(&self, keys: &[String]) {
+        if keys.is_empty() {
+            return;
+        }
+        if let Ok(mut record) = self.presence.lock() {
+            for key in keys {
+                if record
+                    .get(key)
+                    .is_some_and(|(presence, _)| *presence == Presence::Arrived)
+                {
+                    record.remove(key);
+                }
+            }
+        }
+        self.device_revision.fetch_add(1, Ordering::Relaxed);
+        self.peer_revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether Flow's latest move of every one of `keys` was sending it away.
+    pub(super) fn all_departed(&self, keys: &[String]) -> bool {
+        self.presence.lock().is_ok_and(|record| {
+            keys.iter().all(|key| {
+                record
+                    .get(key)
+                    .is_some_and(|(presence, _)| *presence == Presence::Departed)
+            })
+        })
+    }
+
+    /// The devices with their inventory online state corrected by what Flow
+    /// itself did within [`PRESENCE_TTL`].
+    pub(super) fn effective_devices(&self) -> Vec<RuntimeDevice> {
+        let devices = self.devices_snapshot();
+        let Ok(record) = self.presence.lock() else {
+            return devices;
+        };
+        apply_presence(devices, &record, std::time::Instant::now())
     }
 
     /// The configured peer this machine's `side` hands off to.
@@ -676,6 +768,17 @@ impl GenerationState {
     }
 
     fn update_devices(&self, snapshots: &[FlowDeviceSnapshot]) {
+        // Once the inventory agrees with a presence record, the record has
+        // done its job; dropping it lets a later change Flow did not make (an
+        // Easy-Switch button press, say) show at once instead of after the TTL.
+        if let Ok(mut record) = self.presence.lock() {
+            record.retain(|key, (presence, _)| {
+                snapshots
+                    .iter()
+                    .find(|snapshot| &snapshot.config_key == key)
+                    .is_none_or(|snapshot| snapshot.online != (*presence == Presence::Arrived))
+            });
+        }
         if let Ok(mut devices) = self.devices.write() {
             *devices = runtime_devices(&self.config, snapshots);
             self.device_revision.fetch_add(1, Ordering::Relaxed);
@@ -867,7 +970,7 @@ impl GenerationState {
 
     pub(super) fn outgoing_devices(&self, peer: &str) -> Vec<OutgoingDevice> {
         let mut devices: Vec<_> = self
-            .devices_snapshot()
+            .effective_devices()
             .into_iter()
             .filter(|device| device.snapshot.online)
             .filter_map(|device| {
@@ -876,6 +979,8 @@ impl GenerationState {
                 Some((
                     device.snapshot.kind,
                     OutgoingDevice {
+                        pointing: is_pointing_device(device.snapshot.kind),
+                        key: device.snapshot.config_key,
                         route,
                         host,
                         identity: device.identity,
@@ -911,6 +1016,10 @@ impl GenerationState {
             .map(|device| (device.route.clone(), device.host))
             .collect();
         openlogi_hid::switch_hosts(&targets, &self.channel_pool).await?;
+        self.note_presence(
+            devices.iter().map(|device| device.key.as_str()),
+            Presence::Departed,
+        );
         Ok(true)
     }
 
@@ -942,7 +1051,7 @@ impl GenerationState {
         }
     }
 
-    async fn publish_device_state(&self) {
+    pub(super) async fn publish_device_state(&self) {
         let initial = self.initial_state(PublicKey::new([0; 32]));
         let connections: Vec<_> = self.connections.read().map_or_else(
             |_| Vec::new(),
@@ -1026,7 +1135,7 @@ async fn probe_pending_host_counts(state: &GenerationState) {
 
 impl TrustedStateProvider for GenerationState {
     fn initial_state(&self, _peer_key: PublicKey) -> TrustedInitialState {
-        let devices = self.devices_snapshot();
+        let devices = self.effective_devices();
         TrustedInitialState {
             announce_devices: proto::AnnounceDevices {
                 devices: devices
@@ -1062,6 +1171,30 @@ impl TrustedStateProvider for GenerationState {
             },
         }
     }
+}
+
+/// Correct each device's inventory online state by a Flow presence record
+/// younger than [`PRESENCE_TTL`] at `now`.
+fn apply_presence(
+    devices: Vec<RuntimeDevice>,
+    record: &HashMap<String, (Presence, std::time::Instant)>,
+    now: std::time::Instant,
+) -> Vec<RuntimeDevice> {
+    devices
+        .into_iter()
+        .map(|mut device| {
+            let recent = record
+                .get(&device.snapshot.config_key)
+                .filter(|(_, at)| now.saturating_duration_since(*at) < PRESENCE_TTL)
+                .map(|(presence, _)| *presence);
+            match recent {
+                Some(Presence::Arrived) => device.snapshot.online = true,
+                Some(Presence::Departed) => device.snapshot.online = false,
+                None => {}
+            }
+            device
+        })
+        .collect()
 }
 
 fn runtime_devices(
@@ -1131,21 +1264,38 @@ async fn run_application_connection(
     peer: PublicKey,
     connection: Arc<FlowConnection>,
 ) {
-    loop {
-        tokio::select! {
-            rpc = connection.accept_rpc() => match rpc {
+    // One loop per stream kind, never a `select!` over both accepts: neither
+    // is cancel-safe, so the losing branch would drop a stream it had already
+    // accepted, and the request or notification on it. A single stream the
+    // peer reset or garbled is skipped; only a lost connection ends a loop.
+    let rpcs = async {
+        loop {
+            match connection.accept_rpc().await {
                 Ok(event @ (RpcEvent::Request(_) | RpcEvent::Rejected(_))) => {
                     handle_rpc(Arc::clone(&state), peer, event).await;
                 }
-                Err(_) => return,
-            },
-            notification = connection.accept_notification() => match notification {
-                Ok(event @ (NotificationEvent::Notification(_) | NotificationEvent::Dropped(_))) => {
+                Err(error) if error.is_connection_lost() => return,
+                Err(error) => debug!(%error, "Flow request stream failed"),
+            }
+        }
+    };
+    let notifications = async {
+        loop {
+            match connection.accept_notification().await {
+                Ok(
+                    event @ (NotificationEvent::Notification(_) | NotificationEvent::Dropped(_)),
+                ) => {
                     handle_notification(Arc::clone(&state), peer, event).await;
                 }
-                Err(_) => return,
-            },
+                Err(error) if error.is_connection_lost() => return,
+                Err(error) => debug!(%error, "Flow notification stream failed"),
+            }
         }
+    };
+    // The connection is gone once either accept says so.
+    tokio::select! {
+        () = rpcs => {}
+        () = notifications => {}
     }
 }
 
@@ -2472,7 +2622,8 @@ mod tests {
         .expect("both devices must switch before arrival tracking begins");
 
         pair.arrive_indices(&[0]).await;
-        tokio::time::timeout(Duration::from_secs(5), async {
+        // Past the receiver's 8 s arm deadline.
+        tokio::time::timeout(Duration::from_secs(12), async {
             while !pair.receiver.handoffs.has_completed_incoming().await {
                 tokio::task::yield_now().await;
             }
