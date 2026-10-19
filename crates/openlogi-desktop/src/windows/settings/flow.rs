@@ -540,8 +540,12 @@ mod tests {
         (visual, commands)
     }
 
-    /// Click the element tagged `selector`, which must be on screen.
-    fn click(visual: &mut VisualTestContext, selector: &'static str) {
+    /// Click the element tagged `selector`, which must be on screen, once
+    /// pending effects have settled and the frame is fresh. Returns where it
+    /// was, for failure messages.
+    fn click(visual: &mut VisualTestContext, selector: &'static str) -> String {
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
         let bounds = visual
             .debug_bounds(selector)
             .unwrap_or_else(|| panic!("{selector} is not rendered"));
@@ -552,6 +556,17 @@ mod tests {
         );
         visual.simulate_click(bounds.center(), Modifiers::default());
         visual.run_until_parked();
+        let after = visual.debug_bounds(selector);
+        format!("{selector} clicked at {bounds:?} in {viewport:?}, now at {after:?}")
+    }
+
+    /// Whether a queued command matches `wanted`. Other commands may be
+    /// queued too: on macOS debug builds Settings polls the event monitor.
+    fn sent(
+        commands: &mut tokio::sync::mpsc::UnboundedReceiver<crate::services::ipc::Command>,
+        wanted: impl Fn(&crate::services::ipc::Command) -> bool,
+    ) -> bool {
+        std::iter::from_fn(|| commands.try_recv().ok()).any(|command| wanted(&command))
     }
 
     #[gpui::test]
@@ -571,11 +586,14 @@ mod tests {
         let (mut visual, mut commands) = open_flow_page(cx, Config::ephemeral(), &status);
         assert!(visual.debug_bounds("flow-pairing-code").is_some());
         assert!(visual.debug_bounds("flow-pair-start").is_none());
-        click(&mut visual, "flow-pair-confirm");
-        assert!(matches!(
-            commands.try_recv(),
-            Ok(crate::services::ipc::Command::FlowPairConfirm(_))
-        ));
+        let clicked = click(&mut visual, "flow-pair-confirm");
+        assert!(
+            sent(&mut commands, |command| matches!(
+                command,
+                crate::services::ipc::Command::FlowPairConfirm(_)
+            )),
+            "{clicked}"
+        );
         visual.update(|window, _| window.remove_window());
     }
 
@@ -588,11 +606,14 @@ mod tests {
         };
         let (mut visual, mut commands) = open_flow_page(cx, Config::ephemeral(), &status);
         assert!(visual.debug_bounds("flow-pairing-note").is_none());
-        click(&mut visual, "flow-pair-listen");
-        assert!(matches!(
-            commands.try_recv(),
-            Ok(crate::services::ipc::Command::FlowPairListen(_))
-        ));
+        let clicked = click(&mut visual, "flow-pair-listen");
+        assert!(
+            sent(&mut commands, |command| matches!(
+                command,
+                crate::services::ipc::Command::FlowPairListen(_)
+            )),
+            "{clicked}"
+        );
 
         visual.update(|window, cx| {
             apply_refusal(cx, FlowCommandError::AlreadyActive);
