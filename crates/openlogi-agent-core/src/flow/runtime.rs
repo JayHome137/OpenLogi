@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
-use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
@@ -10,8 +9,8 @@ use std::time::{Duration, Instant};
 use buffa::EnumValue;
 use openlogi_core::config::{Config, FlowPeer};
 use openlogi_flow::discovery::{
-    CandidateSource, DEFAULT_PORT, ManualCandidateSource, MdnsAdvertiser, MdnsCandidateSource,
-    MdnsRecord, collect_candidates,
+    CandidateSource, ManualCandidateSource, MdnsAdvertiser, MdnsCandidateSource, MdnsRecord,
+    collect_candidates,
 };
 use openlogi_flow::frame::FrameKind;
 use openlogi_flow::generated as proto;
@@ -145,8 +144,10 @@ impl FlowGeneration {
         // so normal Flow connections remain strictly pinned.
         let trust = PeerTrust::pairing(config.peers.iter().map(|peer| peer.public_key));
         trust.disable_pairing();
-        let endpoint = Arc::new(FlowEndpoint::bind(
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
+        // Every IPv6 and IPv4 address, so peers reachable only over IPv6
+        // (or only over IPv4) can still dial in.
+        let endpoint = Arc::new(FlowEndpoint::bind_any(
+            config.port,
             identity,
             trust.clone(),
             hello,
@@ -1828,6 +1829,7 @@ mod tests {
         ReplayChannel, ReplayNode, ReplayTopology,
     };
     use openlogi_hook::edge::DisplayRect;
+    use std::net::{Ipv4Addr, SocketAddr};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::Duration;
@@ -2453,6 +2455,7 @@ mod tests {
             Arc::new(CompiledFlowConfig {
                 enabled: true,
                 clipboard: true,
+                port: openlogi_flow::discovery::DEFAULT_PORT,
                 peers: vec![super::super::config::CompiledPeer {
                     name: peer_name.into(),
                     public_key: peer,

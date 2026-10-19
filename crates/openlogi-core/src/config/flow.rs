@@ -27,6 +27,11 @@ pub struct FlowConfig {
         skip_serializing_if = "is_default_clipboard"
     )]
     pub clipboard: bool,
+    /// UDP port Flow listens on, on every IPv6 and IPv4 address. `None` uses
+    /// the protocol default, 42424. Peers dialing this machine by a manual
+    /// address must then name the port (`host:port`); mDNS advertises it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     /// Trusted peer machines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<FlowPeer>,
@@ -44,6 +49,7 @@ impl Default for FlowConfig {
             enabled: false,
             require_modifier: false,
             clipboard: default_clipboard(),
+            port: None,
             peers: Vec::new(),
             layout: Vec::new(),
             devices: Vec::new(),

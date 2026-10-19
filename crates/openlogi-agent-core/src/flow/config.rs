@@ -11,6 +11,8 @@ pub(super) struct CompiledFlowConfig {
     pub(super) enabled: bool,
     /// Whether clipboard sharing is on (`[flow] clipboard`).
     pub(super) clipboard: bool,
+    /// UDP listening port (`[flow] port`, default 42424).
+    pub(super) port: u16,
     pub(super) peers: Vec<CompiledPeer>,
     pub(super) layout: HashMap<EdgeSide, usize>,
     pub(super) devices: BTreeMap<String, BTreeMap<String, u8>>,
@@ -26,6 +28,12 @@ pub(super) struct CompiledPeer {
 
 impl CompiledFlowConfig {
     pub(super) fn compile(config: &FlowConfig) -> Result<Self, FlowConfigError> {
+        let port = config
+            .port
+            .unwrap_or(openlogi_flow::discovery::DEFAULT_PORT);
+        if port == 0 {
+            return Err(FlowConfigError::InvalidPort);
+        }
         let mut peer_names = HashSet::new();
         let mut peer_keys = HashSet::new();
         let mut peers = Vec::with_capacity(config.peers.len());
@@ -92,6 +100,7 @@ impl CompiledFlowConfig {
         Ok(Self {
             enabled: config.enabled,
             clipboard: config.clipboard,
+            port,
             peers,
             layout,
             devices,
@@ -157,6 +166,8 @@ pub(super) fn format_public_key(key: PublicKey) -> String {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub(super) enum FlowConfigError {
+    #[error("Flow port must be between 1 and 65535")]
+    InvalidPort,
     #[error("Flow peer names must not be empty")]
     EmptyPeerName,
     #[error("duplicate Flow peer name {0:?}")]
@@ -197,6 +208,7 @@ mod tests {
             enabled: true,
             require_modifier: true,
             clipboard: true,
+            port: Some(50_000),
             peers: vec![FlowPeer {
                 name: "desk".into(),
                 public_key: key("ab"),
@@ -216,6 +228,20 @@ mod tests {
         assert!(compiled.enabled);
         assert!(config.require_modifier);
         assert_eq!(compiled.layout[&EdgeSide::Right], 0);
+        assert_eq!(compiled.port, 50_000);
+        assert_eq!(
+            CompiledFlowConfig::compile(&FlowConfig::default())
+                .expect("default config")
+                .port,
+            openlogi_flow::discovery::DEFAULT_PORT
+        );
+        assert!(matches!(
+            CompiledFlowConfig::compile(&FlowConfig {
+                port: Some(0),
+                ..FlowConfig::default()
+            }),
+            Err(FlowConfigError::InvalidPort)
+        ));
         assert_eq!(compiled.devices["unit:01020304"]["desk"], 1);
         assert_eq!(compiled.status().peers[0].public_key, key("ab"));
     }

@@ -514,3 +514,41 @@ impl PeerHelloKey for FlowConnection {
         )?)
     }
 }
+
+#[tokio::test]
+async fn bind_any_accepts_ipv4_and_dials_ipv4_peers() -> TestResult {
+    let any_identity = MachineIdentity::generate()?;
+    let v4_identity = MachineIdentity::generate()?;
+    let any = Arc::new(FlowEndpoint::bind_any(
+        0,
+        any_identity.clone(),
+        PeerTrust::pinned([v4_identity.public_key()]),
+        hello(&any_identity, [1; 16], (1, 1)),
+    )?);
+    let v4 = Arc::new(FlowEndpoint::bind(
+        localhost(),
+        v4_identity.clone(),
+        PeerTrust::pinned([any_identity.public_key()]),
+        hello(&v4_identity, [2; 16], (1, 1)),
+    )?);
+    let port = any.local_addr()?.port();
+    assert_ne!(port, 0);
+
+    // An IPv4-only peer reaches the wildcard endpoint over IPv4 loopback.
+    let acceptor = Arc::clone(&any);
+    let accepted = tokio::spawn(async move { acceptor.accept().await });
+    let dialed = v4
+        .connect(SocketAddr::from((Ipv4Addr::LOCALHOST, port)))
+        .await?;
+    let inbound = accepted.await??;
+    assert_eq!(dialed.trust(), SessionTrust::Trusted);
+    assert_eq!(inbound.trust(), SessionTrust::Trusted);
+
+    // And the wildcard endpoint can dial an IPv4 address itself.
+    let acceptor = Arc::clone(&v4);
+    let accepted = tokio::spawn(async move { acceptor.accept().await });
+    let outbound = any.connect(v4.local_addr()?).await?;
+    accepted.await??;
+    assert_eq!(outbound.trust(), SessionTrust::Trusted);
+    Ok(())
+}

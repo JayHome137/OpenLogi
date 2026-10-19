@@ -30,6 +30,9 @@ app_icon = "openlogi"
 # Share the clipboard with connected peers (default true). With false, copies
 # are neither announced to peers nor prefetched from them.
 # clipboard = true
+# UDP port Flow listens on, on every IPv6 and IPv4 address (default 42424).
+# Peers that dial this machine by manual address then need "host:port".
+# port = 42424
 #
 # [[flow.peers]]
 # name = "work-laptop"

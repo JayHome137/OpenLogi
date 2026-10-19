@@ -360,7 +360,9 @@ milestone 2 onward:
    (lan-mouse precedent). mDNS is an optimization for the flat-LAN case,
    never a requirement for a link to form. An omitted port uses Flow's
    default UDP port, **42424**; an explicit `host:port` overrides it, while
-   mDNS always uses the port in the resolved service record.
+   mDNS always uses the port in the resolved service record. The listener
+   binds every IPv6 and IPv4 address (one dual-stack socket, IPv4-only on
+   hosts without IPv6) on `[flow] port`, which defaults to 42424.
 2. **Trust never derives from reachability.** Identity is the pinned key and
    the session is mutually authenticated E2E, so a shared or hostile overlay
    network adds no risk and no trusted party.
