@@ -2,7 +2,7 @@
 //! keeps them as the light's settings, as Options+ does.
 
 use openlogi_core::device::{ChangedOnLight, LightState};
-use openlogi_ipc::{ChosenLight, ObservedLight};
+use openlogi_ipc::{ChosenLight, FlowStatus, ObservedLight};
 
 use super::fn_lock::drain;
 use super::*;
@@ -333,6 +333,7 @@ fn an_agent_snapshot_keeps_the_changes_it_reports() {
             (true, 135, 5000),
             brightness_changed_to(50),
         )],
+        flow: FlowStatus::default(),
     };
 
     let changes = state.apply_agent_snapshot(&snapshot, &AssetResolver::new(), &[]);
