@@ -1779,12 +1779,43 @@ const fn ipc_link_state(state: LinkState) -> FlowLinkState {
     }
 }
 
+/// The name this machine announces to Flow peers.
+///
+/// Asks the OS for its host name (`gethostname(2)`, or `GetComputerNameExW`
+/// on Windows). `$HOSTNAME` is a shell variable that a launchd agent, a
+/// systemd user unit or a GUI login never sees, so relying on it made almost
+/// every agent announce itself as plain "OpenLogi". The environment is kept
+/// only as a fallback.
 fn machine_name() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .ok()
-        .filter(|name| !name.is_empty())
+    machine_name_from(
+        gethostname::gethostname().to_str(),
+        std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn machine_name_from(os_hostname: Option<&str>, env_hostname: Option<&str>) -> String {
+    [os_hostname, env_hostname]
+        .into_iter()
+        .flatten()
+        .map(display_hostname)
+        .find(|name| !name.is_empty())
         .unwrap_or_else(|| "OpenLogi".to_owned())
+}
+
+/// Drops the mDNS `.local` suffix macOS host names carry, so peers show
+/// "Jays-MacBook-Pro" rather than "Jays-MacBook-Pro.local".
+fn display_hostname(name: &str) -> String {
+    let name = name.trim().trim_end_matches('.');
+    let name = name
+        .len()
+        .checked_sub(".local".len())
+        .filter(|&split| name.is_char_boundary(split))
+        .filter(|&split| name[split..].eq_ignore_ascii_case(".local"))
+        .map_or(name, |split| &name[..split]);
+    name.to_owned()
 }
 
 fn platform() -> proto::Platform {
@@ -2083,6 +2114,22 @@ mod tests {
         let again = record_paired_peer(&mut config, "key", "renamed", "192.0.2.2:42424");
         assert_eq!(again, "laptop");
         assert_eq!(config.flow.peers[0].addresses.len(), 2);
+    }
+
+    #[test]
+    fn machine_name_prefers_the_os_host_name_and_falls_back() {
+        assert_eq!(
+            machine_name_from(Some("Jays-MacBook-Pro.local"), Some("ignored")),
+            "Jays-MacBook-Pro"
+        );
+        assert_eq!(machine_name_from(Some("desk.LOCAL."), None), "desk");
+        assert_eq!(
+            machine_name_from(Some("  "), Some("WORKSTATION")),
+            "WORKSTATION"
+        );
+        assert_eq!(machine_name_from(None, Some("")), "OpenLogi");
+        assert_eq!(machine_name_from(Some(".local"), None), "OpenLogi");
+        assert!(!machine_name().is_empty());
     }
 
     #[test]
