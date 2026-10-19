@@ -10,6 +10,8 @@ pub use inject::{
     warp_cursor,
 };
 
+#[cfg(target_os = "windows")]
+pub use inject::PhysicalPixelScope;
 #[cfg(target_os = "linux")]
 pub use inject::action_device_path;
 #[cfg(target_os = "macos")]

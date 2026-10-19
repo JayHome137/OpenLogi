@@ -4,7 +4,7 @@ mod tls;
 
 use std::{
     io,
-    net::SocketAddr,
+    net::{Ipv4Addr, Ipv6Addr, SocketAddr, UdpSocket},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -57,9 +57,42 @@ impl FlowEndpoint {
         trust: PeerTrust,
         hello: proto::Hello,
     ) -> Result<Self, TransportError> {
+        Self::on_socket(UdpSocket::bind(address)?, identity, trust, hello)
+    }
+
+    /// Binds `port` on every local address: one IPv6 socket with
+    /// `IPV6_V6ONLY` cleared, which also carries IPv4 peers as v4-mapped
+    /// addresses (Windows enables `IPV6_V6ONLY` by default, so it is cleared
+    /// explicitly). A host without IPv6 falls back to IPv4 only.
+    pub fn bind_any(
+        port: u16,
+        identity: MachineIdentity,
+        trust: PeerTrust,
+        hello: proto::Hello,
+    ) -> Result<Self, TransportError> {
+        let socket = match dual_stack_socket(port) {
+            Ok(socket) => socket,
+            Err(_) => UdpSocket::bind(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port)))?,
+        };
+        Self::on_socket(socket, identity, trust, hello)
+    }
+
+    fn on_socket(
+        socket: UdpSocket,
+        identity: MachineIdentity,
+        trust: PeerTrust,
+        hello: proto::Hello,
+    ) -> Result<Self, TransportError> {
         validate_local_hello(&hello, identity.public_key())?;
         let (server_config, client_config) = quic_configs(&identity, trust.clone())?;
-        let mut endpoint = Endpoint::server(server_config, address)?;
+        let runtime =
+            quinn::default_runtime().ok_or_else(|| io::Error::other("no async runtime found"))?;
+        let mut endpoint = Endpoint::new(
+            quinn::EndpointConfig::default(),
+            Some(server_config),
+            socket,
+            runtime,
+        )?;
         endpoint.set_default_client_config(client_config);
         Ok(Self {
             endpoint,
@@ -991,4 +1024,16 @@ impl FrameKind {
     const fn is_pretrust(self) -> bool {
         matches!(self.wire_value(), 0x0001..=0x001f)
     }
+}
+
+/// An unspecified-address IPv6 UDP socket that also accepts IPv4.
+fn dual_stack_socket(port: u16) -> io::Result<UdpSocket> {
+    let socket = socket2::Socket::new(
+        socket2::Domain::IPV6,
+        socket2::Type::DGRAM,
+        Some(socket2::Protocol::UDP),
+    )?;
+    socket.set_only_v6(false)?;
+    socket.bind(&SocketAddr::from((Ipv6Addr::UNSPECIFIED, port)).into())?;
+    Ok(socket.into())
 }

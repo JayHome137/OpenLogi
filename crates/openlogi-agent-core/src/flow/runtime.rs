@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 use std::fs::{self, OpenOptions};
 use std::io::{self, Write as _};
-use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use buffa::EnumValue;
-use openlogi_core::config::{Config, FlowPeer};
+use openlogi_core::config::{Config, ConfigError, ConfigFile, FlowPeer};
 use openlogi_flow::discovery::{
-    CandidateSource, DEFAULT_PORT, ManualCandidateSource, MdnsAdvertiser, MdnsCandidateSource,
-    MdnsRecord, collect_candidates,
+    CandidateSource, ManualCandidateSource, MdnsAdvertiser, MdnsCandidateSource, MdnsRecord,
+    collect_candidates,
 };
 use openlogi_flow::frame::FrameKind;
 use openlogi_flow::generated as proto;
@@ -30,12 +29,12 @@ use openlogi_flow::transport::{
     SessionTrust, error_envelope, message_envelope,
 };
 use openlogi_hid::{ChannelPool, DeviceRoute};
-use openlogi_hook::edge::{EdgeSide, ExposedEdges};
+use openlogi_hook::edge::{ARRIVAL_INSET, EdgeSide, ExposedEdges};
 use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::clipboard::ClipboardManager;
 use super::config::CompiledFlowConfig;
@@ -119,11 +118,16 @@ impl FlowGeneration {
         let identity = tokio::task::spawn_blocking(load_machine_identity)
             .await
             .map_err(|error| FlowRuntimeError::IdentityTask(error.to_string()))??;
-        let capabilities = vec![
-            EnumValue::from(proto::Capability::ClipboardText as i32),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            EnumValue::from(proto::Capability::ClipboardFiles as i32),
-        ];
+        // With clipboard sharing off, advertise no clipboard capability.
+        let capabilities = if config.clipboard {
+            vec![
+                EnumValue::from(proto::Capability::ClipboardText as i32),
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                EnumValue::from(proto::Capability::ClipboardFiles as i32),
+            ]
+        } else {
+            Vec::new()
+        };
         let hello = proto::Hello {
             proto_min: PROTOCOL_MIN,
             proto_max: PROTOCOL_MAX,
@@ -140,8 +144,10 @@ impl FlowGeneration {
         // so normal Flow connections remain strictly pinned.
         let trust = PeerTrust::pairing(config.peers.iter().map(|peer| peer.public_key));
         trust.disable_pairing();
-        let endpoint = Arc::new(FlowEndpoint::bind(
-            SocketAddr::from((Ipv4Addr::UNSPECIFIED, DEFAULT_PORT)),
+        // Every IPv6 and IPv4 address, so peers reachable only over IPv6
+        // (or only over IPv4) can still dial in.
+        let endpoint = Arc::new(FlowEndpoint::bind_any(
+            config.port,
             identity,
             trust.clone(),
             hello,
@@ -197,8 +203,14 @@ impl FlowGeneration {
         let pairing_reserved = Arc::new(AtomicBool::new(false));
         let pairing_window = Arc::new(AtomicBool::new(false));
         let handles: Vec<_> = sessions.peers().cloned().collect();
-        let mut tasks = Vec::with_capacity(handles.len() * 2 + 2);
-        tasks.push(tokio::spawn(run_clipboard_loop(Arc::clone(&state))));
+        let mut tasks = Vec::with_capacity(handles.len() * 2 + 3);
+        tasks.push(tokio::spawn(probe_host_counts(Arc::clone(&state))));
+        if state.config.clipboard {
+            tasks.push(tokio::spawn(run_clipboard_loop(Arc::clone(&state))));
+        } else {
+            // Nothing captured before the switch may still be served or pasted.
+            state.clipboard.forget_all().await;
+        }
         tasks.push(tokio::spawn(run_pairing_acceptor(
             Arc::clone(&state),
             trust.clone(),
@@ -537,6 +549,9 @@ impl FlowGeneration {
 
     async fn update_devices(&self, snapshots: &[FlowDeviceSnapshot]) {
         self.state.update_devices(snapshots);
+        if !self.state.host_count_targets().is_empty() {
+            tokio::spawn(probe_host_counts(Arc::clone(&self.state)));
+        }
         self.state.publish_device_state().await;
         inventory_changed(Arc::clone(&self.state)).await;
     }
@@ -562,7 +577,17 @@ impl FlowGeneration {
 
 pub(super) struct GenerationState {
     pub(super) config: Arc<CompiledFlowConfig>,
+    /// Edge → peer-index mapping. Starts as `config.layout` and is replaced in
+    /// place by a layout-only config reload, without restarting networking.
+    layout: RwLock<HashMap<EdgeSide, usize>>,
     pub(super) devices: RwLock<Vec<RuntimeDevice>>,
+    /// Host-slot counts read from the devices themselves (`0x1815`, else
+    /// `0x1814`), by config key. Announced in place of the config-derived
+    /// guess once known.
+    device_host_counts: RwLock<HashMap<String, u8>>,
+    /// Set while a [`probe_host_counts`] pass runs, so inventory churn does
+    /// not stack concurrent reads of the same devices.
+    probing_host_counts: AtomicBool,
     connections: RwLock<HashMap<PublicKey, Arc<FlowConnection>>>,
     link_states: RwLock<HashMap<PublicKey, LinkState>>,
     remote_states: RwLock<HashMap<PublicKey, RemotePeerState>>,
@@ -604,8 +629,11 @@ impl GenerationState {
     ) -> Self {
         let devices = runtime_devices(&config, snapshots);
         Self {
+            layout: RwLock::new(config.layout.clone()),
             config,
             devices: RwLock::new(devices),
+            device_host_counts: RwLock::new(HashMap::new()),
+            probing_host_counts: AtomicBool::new(false),
             connections: RwLock::new(HashMap::new()),
             link_states: RwLock::new(HashMap::new()),
             remote_states: RwLock::new(HashMap::new()),
@@ -619,6 +647,20 @@ impl GenerationState {
             handoffs: HandoffBook::default(),
             clipboard,
             pairing_phase: RwLock::new(None),
+        }
+    }
+
+    /// The configured peer this machine's `side` hands off to.
+    pub(super) fn layout_peer(&self, side: EdgeSide) -> Option<&super::config::CompiledPeer> {
+        let index = *self.layout.read().ok()?.get(&side)?;
+        self.config.peers.get(index)
+    }
+
+    /// Apply a layout-only reload. Peer indexes refer to `self.config.peers`,
+    /// which a layout-only change leaves untouched.
+    pub(super) fn set_layout(&self, layout: HashMap<EdgeSide, usize>) {
+        if let Ok(mut current) = self.layout.write() {
+            *current = layout;
         }
     }
 
@@ -639,6 +681,55 @@ impl GenerationState {
             self.device_revision.fetch_add(1, Ordering::Relaxed);
             self.peer_revision.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Online, routable devices whose host count has not been read yet.
+    fn host_count_targets(&self) -> Vec<(String, DeviceRoute)> {
+        let known = self
+            .device_host_counts
+            .read()
+            .map(|counts| counts.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.devices_snapshot()
+            .into_iter()
+            .filter(|device| device.snapshot.online && !known.contains(&device.snapshot.config_key))
+            .filter_map(|device| Some((device.snapshot.config_key, device.snapshot.route?)))
+            .collect()
+    }
+
+    /// Record a device-reported host count; true when the announced view
+    /// changed.
+    fn record_host_count(&self, config_key: &str, count: u8) -> bool {
+        let Ok(mut counts) = self.device_host_counts.write() else {
+            return false;
+        };
+        if counts.insert(config_key.to_owned(), count) == Some(count) {
+            return false;
+        }
+        drop(counts);
+        if let Some(device) = self
+            .devices_snapshot()
+            .into_iter()
+            .find(|device| device.snapshot.config_key == config_key)
+            && let Some((machine, &host)) = device.channels.iter().find(|(_, host)| **host >= count)
+        {
+            warn!(
+                device = config_key,
+                machine = machine.as_str(),
+                host = host + 1,
+                count,
+                "Flow device config names a host slot the device does not have"
+            );
+        }
+        self.device_revision.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn device_host_count(&self, config_key: &str) -> Option<u8> {
+        self.device_host_counts
+            .read()
+            .ok()
+            .and_then(|counts| counts.get(config_key).copied())
     }
 
     pub(super) fn devices_snapshot(&self) -> Vec<RuntimeDevice> {
@@ -870,6 +961,69 @@ impl GenerationState {
     }
 }
 
+/// The host-slot count announced for a device: what the device reported, or,
+/// until it has been read (or when it cannot be), the smallest count the
+/// configured channels imply.
+fn announced_host_count(
+    device_reported: Option<u8>,
+    channels: &std::collections::BTreeMap<String, u8>,
+) -> u32 {
+    device_reported.filter(|&count| count > 0).map_or_else(
+        || {
+            channels
+                .values()
+                .copied()
+                .max()
+                .map_or(0, |host| u32::from(host) + 1)
+        },
+        u32::from,
+    )
+}
+
+/// Read each online device's host-slot count from the device and announce it.
+///
+/// Runs off the controller loop; holds a receiver I/O lease per read so it
+/// never interleaves with a host switch. A device that cannot report its
+/// count keeps the config-derived value.
+async fn probe_host_counts(state: Arc<GenerationState>) {
+    if state.probing_host_counts.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    probe_pending_host_counts(&state).await;
+    state.probing_host_counts.store(false, Ordering::Release);
+}
+
+async fn probe_pending_host_counts(state: &GenerationState) {
+    let mut changed = false;
+    // Re-list after every read so a device that comes online mid-pass is
+    // still read; each device is tried once per pass.
+    let mut attempted = std::collections::HashSet::new();
+    while let Some((config_key, route)) = state
+        .host_count_targets()
+        .into_iter()
+        .find(|(key, _)| !attempted.contains(key))
+    {
+        if !state.is_active() {
+            return;
+        }
+        attempted.insert(config_key.clone());
+        let result = {
+            let _lease = state.receiver_access.acquire_for_io().await;
+            openlogi_hid::read_host_count(&state.channel_pool, &route).await
+        };
+        match result {
+            Ok(count) if count > 0 => changed |= state.record_host_count(&config_key, count),
+            Ok(_) => debug!(device = config_key, "Flow device reports no host slots"),
+            Err(error) => {
+                debug!(device = config_key, %error, "Flow device host count unreadable; using config");
+            }
+        }
+    }
+    if changed && state.is_active() {
+        state.publish_device_state().await;
+    }
+}
+
 impl TrustedStateProvider for GenerationState {
     fn initial_state(&self, _peer_key: PublicKey) -> TrustedInitialState {
         let devices = self.devices_snapshot();
@@ -883,12 +1037,10 @@ impl TrustedStateProvider for GenerationState {
                                 device.channels.get("self").copied().unwrap_or_default(),
                             ),
                             connected: device.snapshot.online,
-                            host_count: device
-                                .channels
-                                .values()
-                                .copied()
-                                .max()
-                                .map_or(0, |host| u32::from(host) + 1),
+                            host_count: announced_host_count(
+                                self.device_host_count(&device.snapshot.config_key),
+                                &device.channels,
+                            ),
                             ..Default::default()
                         };
                         *view.identity.get_or_insert_default() = device.identity.clone();
@@ -1424,6 +1576,88 @@ async fn handle_pairing_abort(
     }
 }
 
+/// How often a pairing commit retries a save another writer raced with.
+const PAIRING_SAVE_ATTEMPTS: usize = 5;
+
+/// Records a paired peer through the conflict-checked, locked config writer.
+///
+/// The peer is re-applied to a freshly loaded config on every attempt, so an
+/// edit another process (GUI, CLI, a hand edit) saved between our load and our
+/// save is kept instead of being overwritten by a stale copy — which is what
+/// the previous `Config::load_or_default` + `save_atomic` pair did. Returns
+/// the name the peer was stored under.
+fn persist_paired_peer(
+    load: impl Fn() -> Result<(Config, ConfigFile), ConfigError>,
+    public_key: &str,
+    machine_name: &str,
+    address: &str,
+) -> Result<String, ConfigError> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let (mut config, mut file) = load()?;
+        let name = record_paired_peer(&mut config, public_key, machine_name, address);
+        match file.save(&config) {
+            Ok(()) => return Ok(name),
+            Err(error) if attempt < PAIRING_SAVE_ATTEMPTS && is_transient_save_error(&error) => {
+                warn!(%error, attempt, "Flow pairing config save raced another writer; retrying");
+                std::thread::sleep(Duration::from_millis(20 * attempt as u64));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_transient_save_error(error: &ConfigError) -> bool {
+    match error {
+        ConfigError::Conflict { .. } => true,
+        ConfigError::Write { source, .. } => source.kind() == io::ErrorKind::WouldBlock,
+        _ => false,
+    }
+}
+
+/// Adds or refreshes `public_key` in `config.flow.peers`, choosing a unique
+/// display name for a new peer. Returns the stored name.
+fn record_paired_peer(
+    config: &mut Config,
+    public_key: &str,
+    machine_name: &str,
+    address: &str,
+) -> String {
+    if let Some(peer) = config
+        .flow
+        .peers
+        .iter_mut()
+        .find(|peer| peer.public_key == public_key)
+    {
+        if !address.is_empty() && !peer.addresses.iter().any(|known| known == address) {
+            peer.addresses.push(address.to_owned());
+        }
+        return peer.name.clone();
+    }
+    let base_name = if machine_name.trim().is_empty() {
+        "OpenLogi peer".to_owned()
+    } else {
+        machine_name.trim().to_owned()
+    };
+    let mut name = base_name.clone();
+    let mut suffix = 2_u32;
+    while config.flow.peers.iter().any(|peer| peer.name == name) {
+        name = format!("{base_name} ({suffix})");
+        suffix = suffix.saturating_add(1);
+    }
+    config.flow.peers.push(FlowPeer {
+        name: name.clone(),
+        public_key: public_key.to_owned(),
+        addresses: if address.is_empty() {
+            Vec::new()
+        } else {
+            vec![address.to_owned()]
+        },
+    });
+    name
+}
+
 fn complete_pairing(
     state: &GenerationState,
     trust: &PeerTrust,
@@ -1432,61 +1666,28 @@ fn complete_pairing(
 ) -> Result<(), openlogi_ipc::FlowCommandError> {
     let key = active.session.peer_key();
     let public_key = format_public_key(key);
-    let mut config =
-        Config::load_or_default().map_err(|error| openlogi_ipc::FlowCommandError::Persistence {
-            message: error.to_string(),
-        })?;
-    let base_name = if active.machine_name.trim().is_empty() {
-        "OpenLogi peer".to_owned()
-    } else {
-        active.machine_name.trim().to_owned()
-    };
-    let mut name = base_name.clone();
-    let mut suffix = 2_u32;
-    while config
-        .flow
-        .peers
-        .iter()
-        .any(|peer| peer.name == name && peer.public_key != public_key)
-    {
-        name = format!("{base_name} ({suffix})");
-        suffix = suffix.saturating_add(1);
-    }
-    if let Some(peer) = config
-        .flow
-        .peers
-        .iter_mut()
-        .find(|peer| peer.public_key == public_key)
-    {
-        name.clone_from(&peer.name);
-        if !active.address.is_empty() && !peer.addresses.contains(&active.address) {
-            peer.addresses.push(active.address.clone());
-        }
-    } else {
-        config.flow.peers.push(FlowPeer {
-            name: name.clone(),
-            public_key: public_key.clone(),
-            addresses: if active.address.is_empty() {
-                Vec::new()
-            } else {
-                vec![active.address.clone()]
-            },
-        });
-    }
     active
         .connection
         .promote_after_pairing(&active.session)
         .map_err(pairing_command_error)?;
     let inserted_pin = trust.pin(key);
-    if let Err(error) = config.save_atomic() {
-        if inserted_pin {
-            let _ = trust.unpin(key);
+    let name = match persist_paired_peer(
+        ConfigFile::load_or_default,
+        &public_key,
+        &active.machine_name,
+        &active.address,
+    ) {
+        Ok(name) => name,
+        Err(error) => {
+            if inserted_pin {
+                let _ = trust.unpin(key);
+            }
+            active.connection.revoke_pairing_promotion();
+            return Err(openlogi_ipc::FlowCommandError::Persistence {
+                message: error.to_string(),
+            });
         }
-        active.connection.revoke_pairing_promotion();
-        return Err(openlogi_ipc::FlowCommandError::Persistence {
-            message: error.to_string(),
-        });
-    }
+    };
     trust.disable_pairing();
     state.set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Paired {
         name: name.clone(),
@@ -1641,8 +1842,16 @@ pub(super) fn warp_entry(entry: &proto::EntryPoint) {
     }
 }
 
+/// Where a handed-off cursor enters this machine: [`ARRIVAL_INSET`] inside the
+/// arrival edge, so it sits clearly outside the edge-contact band and a resting
+/// cursor cannot dwell its way straight back to the sender.
+///
+/// The along-edge position is kept the same inset away from both segment ends,
+/// so a corner arrival is not inside the perpendicular side's band either. As
+/// the inset exceeds the contact tolerance plus one pixel, this also holds on
+/// platforms with exclusive right and bottom bounds (Windows `rcMonitor`).
 fn point_on_edge(edges: &ExposedEdges, side: proto::Side, t: f64) -> Option<(f64, f64)> {
-    const INSET: f64 = 1.0;
+    const INSET: f64 = ARRIVAL_INSET;
     let side = match side {
         proto::Side::Left => EdgeSide::Left,
         proto::Side::Right => EdgeSide::Right,
@@ -1668,7 +1877,15 @@ fn point_on_edge(edges: &ExposedEdges, side: proto::Side, t: f64) -> Option<(f64
             false
         }
     })?;
-    let along = (segment.start() + offset).min(segment.end());
+    // Keep clear of the perpendicular edges too: an arrival in a corner would
+    // otherwise sit inside the neighbouring side's contact band.
+    let (low, high) = if segment.end() - segment.start() > 2.0 * INSET {
+        (segment.start() + INSET, segment.end() - INSET)
+    } else {
+        let middle = f64::midpoint(segment.start(), segment.end());
+        (middle, middle)
+    };
+    let along = (segment.start() + offset).clamp(low, high);
     Some(match side {
         EdgeSide::Left => (segment.coordinate() + INSET, along),
         EdgeSide::Right => (segment.coordinate() - INSET, along),
@@ -1685,12 +1902,43 @@ const fn ipc_link_state(state: LinkState) -> FlowLinkState {
     }
 }
 
+/// The name this machine announces to Flow peers.
+///
+/// Asks the OS for its host name (`gethostname(2)`, or `GetComputerNameExW`
+/// on Windows). `$HOSTNAME` is a shell variable that a launchd agent, a
+/// systemd user unit or a GUI login never sees, so relying on it made almost
+/// every agent announce itself as plain "OpenLogi". The environment is kept
+/// only as a fallback.
 fn machine_name() -> String {
-    std::env::var("HOSTNAME")
-        .or_else(|_| std::env::var("COMPUTERNAME"))
-        .ok()
-        .filter(|name| !name.is_empty())
+    machine_name_from(
+        gethostname::gethostname().to_str(),
+        std::env::var("HOSTNAME")
+            .or_else(|_| std::env::var("COMPUTERNAME"))
+            .ok()
+            .as_deref(),
+    )
+}
+
+fn machine_name_from(os_hostname: Option<&str>, env_hostname: Option<&str>) -> String {
+    [os_hostname, env_hostname]
+        .into_iter()
+        .flatten()
+        .map(display_hostname)
+        .find(|name| !name.is_empty())
         .unwrap_or_else(|| "OpenLogi".to_owned())
+}
+
+/// Drops the mDNS `.local` suffix macOS host names carry, so peers show
+/// "Jays-MacBook-Pro" rather than "Jays-MacBook-Pro.local".
+fn display_hostname(name: &str) -> String {
+    let name = name.trim().trim_end_matches('.');
+    let name = name
+        .len()
+        .checked_sub(".local".len())
+        .filter(|&split| name.is_char_boundary(split))
+        .filter(|&split| name[split..].eq_ignore_ascii_case(".local"))
+        .map_or(name, |split| &name[..split]);
+    name.to_owned()
 }
 
 fn platform() -> proto::Platform {
@@ -1784,6 +2032,7 @@ mod tests {
         ReplayChannel, ReplayNode, ReplayTopology,
     };
     use openlogi_hook::edge::DisplayRect;
+    use std::net::{Ipv4Addr, SocketAddr};
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt as _;
     use std::time::Duration;
@@ -1798,11 +2047,11 @@ mod tests {
         let edges = ExposedEdges::from_displays(&displays);
         assert_eq!(
             point_on_edge(&edges, proto::Side::Left, 0.25),
-            Some((1.0, 50.0))
+            Some((ARRIVAL_INSET, 50.0))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Left, 0.75),
-            Some((1.0, 250.0))
+            Some((ARRIVAL_INSET, 250.0))
         );
     }
 
@@ -1812,29 +2061,87 @@ mod tests {
             ExposedEdges::from_displays(&[DisplayRect::new(0.0, 0.0, 100.0, 80.0).unwrap()]);
         assert_eq!(
             point_on_edge(&edges, proto::Side::Left, 0.25),
-            Some((1.0, 20.0))
+            Some((ARRIVAL_INSET, 20.0))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Right, 0.25),
-            Some((99.0, 20.0))
+            Some((100.0 - ARRIVAL_INSET, 20.0))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Top, 0.25),
-            Some((25.0, 1.0))
+            Some((25.0, ARRIVAL_INSET))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Bottom, 0.25),
-            Some((25.0, 79.0))
+            Some((25.0, 80.0 - ARRIVAL_INSET))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Right, -1.0),
-            Some((99.0, 0.0))
+            Some((100.0 - ARRIVAL_INSET, ARRIVAL_INSET))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Right, 2.0),
-            Some((99.0, 80.0))
+            Some((100.0 - ARRIVAL_INSET, 80.0 - ARRIVAL_INSET))
         );
         assert_eq!(point_on_edge(&edges, proto::Side::Unspecified, 0.5), None);
+    }
+
+    #[test]
+    fn layout_reload_remaps_edges_on_the_running_generation() {
+        let peer = PublicKey::new([7; 32]);
+        let empty_backend = Arc::new(
+            ReplayBackend::new(
+                ReplayTopology {
+                    nodes: Vec::new(),
+                    channels: Vec::new(),
+                },
+                Vec::new(),
+            )
+            .expect("empty replay backend"),
+        );
+        let state = test_generation(peer, "desk", &[], ChannelPool::with_backend(empty_backend));
+        assert_eq!(
+            state
+                .layout_peer(EdgeSide::Right)
+                .map(|peer| peer.name.as_str()),
+            Some("desk")
+        );
+        state.set_layout(HashMap::from([(EdgeSide::Top, 0)]));
+        assert!(state.layout_peer(EdgeSide::Right).is_none());
+        assert_eq!(
+            state.layout_peer(EdgeSide::Top).map(|peer| peer.public_key),
+            Some(peer)
+        );
+        assert!(state.is_active());
+    }
+
+    #[test]
+    fn a_resting_arrival_never_dwells_back_across_its_entry_edge() {
+        use openlogi_hook::CursorPosition;
+        use openlogi_hook::edge::{ArmedSides, EdgeDetector, EdgeDetectorParams};
+
+        let edges =
+            ExposedEdges::from_displays(&[DisplayRect::new(0.0, 0.0, 100.0, 80.0).unwrap()]);
+        for side in [
+            proto::Side::Left,
+            proto::Side::Right,
+            proto::Side::Top,
+            proto::Side::Bottom,
+        ] {
+            let (x, y) = point_on_edge(&edges, side, 1.0).expect("arrival point");
+            let mut detector = EdgeDetector::new(
+                edges.clone(),
+                ArmedSides::ALL,
+                EdgeDetectorParams::default(),
+            );
+            for millis in [0, 300, 600, 1_200] {
+                assert_eq!(
+                    detector.update(CursorPosition { x, y }, Duration::from_millis(millis)),
+                    None,
+                    "{side:?} arrival at ({x}, {y}) re-crossed"
+                );
+            }
+        }
     }
 
     #[test]
@@ -1864,6 +2171,156 @@ mod tests {
                 .mode()
                 & 0o777,
             0o600
+        );
+    }
+
+    #[test]
+    fn pairing_save_keeps_an_edit_another_writer_made_after_our_load() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+        let mut seed = Config::default();
+        seed.flow.peers.push(FlowPeer {
+            name: "desk".to_owned(),
+            public_key: "existing-key".to_owned(),
+            addresses: Vec::new(),
+        });
+        seed.save_to_path(&path).expect("seed config");
+
+        let loads = std::cell::Cell::new(0);
+        let name = persist_paired_peer(
+            || {
+                let loaded = ConfigFile::load_from_path(&path);
+                if loads.replace(loads.get() + 1) == 0 {
+                    // Another process saves between our load and our save.
+                    let (mut other, mut file) =
+                        ConfigFile::load_from_path(&path).expect("concurrent load");
+                    other.flow.enabled = true;
+                    file.save(&other).expect("concurrent save");
+                }
+                loaded
+            },
+            "new-key",
+            " desk ",
+            "192.0.2.7:42424",
+        )
+        .expect("pairing save retries past the conflict");
+
+        assert_eq!(loads.get(), 2, "the conflicting save must reload once");
+        assert_eq!(name, "desk (2)");
+        let saved = Config::load_from_path(&path).expect("reload config");
+        assert!(saved.flow.enabled, "the concurrent edit must survive");
+        let peer = saved
+            .flow
+            .peers
+            .iter()
+            .find(|peer| peer.public_key == "new-key")
+            .expect("paired peer persisted");
+        assert_eq!(peer.name, "desk (2)");
+        assert_eq!(peer.addresses, ["192.0.2.7:42424"]);
+    }
+
+    #[test]
+    fn re_pairing_a_known_key_keeps_its_name_and_adds_the_address() {
+        let mut config = Config::default();
+        config.flow.peers.push(FlowPeer {
+            name: "laptop".to_owned(),
+            public_key: "key".to_owned(),
+            addresses: vec!["192.0.2.1:42424".to_owned()],
+        });
+        let name = record_paired_peer(&mut config, "key", "renamed", "192.0.2.2:42424");
+        assert_eq!(name, "laptop");
+        assert_eq!(config.flow.peers.len(), 1);
+        assert_eq!(
+            config.flow.peers[0].addresses,
+            ["192.0.2.1:42424", "192.0.2.2:42424"]
+        );
+        let again = record_paired_peer(&mut config, "key", "renamed", "192.0.2.2:42424");
+        assert_eq!(again, "laptop");
+        assert_eq!(config.flow.peers[0].addresses.len(), 2);
+    }
+
+    #[test]
+    fn machine_name_prefers_the_os_host_name_and_falls_back() {
+        assert_eq!(
+            machine_name_from(Some("Jays-MacBook-Pro.local"), Some("ignored")),
+            "Jays-MacBook-Pro"
+        );
+        assert_eq!(machine_name_from(Some("desk.LOCAL."), None), "desk");
+        assert_eq!(
+            machine_name_from(Some("  "), Some("WORKSTATION")),
+            "WORKSTATION"
+        );
+        assert_eq!(machine_name_from(None, Some("")), "OpenLogi");
+        assert_eq!(machine_name_from(Some(".local"), None), "OpenLogi");
+        assert!(!machine_name().is_empty());
+    }
+
+    #[test]
+    fn announced_host_count_prefers_the_device_over_the_config() {
+        let channels = std::collections::BTreeMap::from([("self".into(), 0), ("desk".into(), 1)]);
+        assert_eq!(announced_host_count(None, &channels), 2);
+        assert_eq!(announced_host_count(Some(0), &channels), 2);
+        assert_eq!(announced_host_count(Some(3), &channels), 3);
+        assert_eq!(
+            announced_host_count(None, &std::collections::BTreeMap::new()),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn device_reported_host_count_replaces_the_config_guess_once_read() {
+        let device = test_device("mouse", 0xb35b, DeviceKind::Mouse, "flow-mouse");
+        let pool = ChannelPool::with_backend(Arc::new(
+            ReplayBackend::new(
+                ReplayTopology {
+                    nodes: Vec::new(),
+                    channels: Vec::new(),
+                },
+                Vec::new(),
+            )
+            .expect("empty replay backend"),
+        ));
+        let state = test_generation(
+            PublicKey::new([7; 32]),
+            "desk",
+            std::slice::from_ref(&device),
+            pool,
+        );
+        let host_count = |state: &GenerationState| {
+            state
+                .initial_state(PublicKey::new([0; 32]))
+                .announce_devices
+                .devices[0]
+                .host_count
+        };
+        assert_eq!(host_count(&state), 2, "config maps hosts 0 and 1");
+        assert_eq!(state.host_count_targets().len(), 1);
+
+        // A device that cannot be read keeps the config value, and the pass
+        // ends (each device is tried once) instead of spinning on it.
+        let state = Arc::new(state);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            probe_host_counts(Arc::clone(&state)),
+        )
+        .await
+        .expect("an unreadable device ends the probe pass");
+        assert!(!state.probing_host_counts.load(Ordering::Acquire));
+        assert_eq!(host_count(&state), 2);
+        assert_eq!(
+            state.host_count_targets().len(),
+            1,
+            "retried on the next update"
+        );
+
+        let revision = state.device_revision.load(Ordering::Relaxed);
+        assert!(state.record_host_count(&device.config_key, 3));
+        assert!(!state.record_host_count(&device.config_key, 3));
+        assert_eq!(host_count(&state), 3);
+        assert!(state.device_revision.load(Ordering::Relaxed) > revision);
+        assert!(
+            state.host_count_targets().is_empty(),
+            "a device is read once per generation"
         );
     }
 
@@ -1927,6 +2384,7 @@ mod tests {
         pair.backend
             .require_complete()
             .expect("ChangeHost cassette fully consumed");
+        pair.assert_lifecycle_free_while_awaiting_arrival().await;
 
         pair.arrive_all().await;
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -2286,6 +2744,23 @@ mod tests {
             );
         }
 
+        /// The host switch is done and the sender now waits for the arrival
+        /// acknowledgment: that wait must not hold the generation's lifecycle
+        /// lock, or a config reload would stall behind the peer.
+        async fn assert_lifecycle_free_while_awaiting_arrival(&self) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !self.sender.handoffs.has_outgoing().await {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("sender is waiting for the arrival acknowledgment");
+            let _lifecycle =
+                tokio::time::timeout(Duration::from_secs(1), self.sender.lifecycle.lock())
+                    .await
+                    .expect("lifecycle lock is free while the arrival is pending");
+        }
+
         async fn arrive_all(&mut self) {
             self.arrive_indices(&(0..self.receiver_snapshots.len()).collect::<Vec<_>>())
                 .await;
@@ -2350,6 +2825,8 @@ mod tests {
         GenerationState::new(
             Arc::new(CompiledFlowConfig {
                 enabled: true,
+                clipboard: true,
+                port: openlogi_flow::discovery::DEFAULT_PORT,
                 peers: vec![super::super::config::CompiledPeer {
                     name: peer_name.into(),
                     public_key: peer,

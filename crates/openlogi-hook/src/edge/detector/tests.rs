@@ -315,3 +315,65 @@ fn geometry_replacement_preserves_crossing_latch_until_rearm() {
             .is_some()
     );
 }
+
+#[test]
+fn suspend_and_side_changes_preserve_crossing_latch() {
+    let display = rect(0.0, 0.0, 100.0, 100.0);
+    let mut detector = EdgeDetector::new(
+        ExposedEdges::from_displays(&[display]),
+        ArmedSides::ALL,
+        dwell_params(),
+    );
+
+    assert!(detector.update(point(0.0, 50.0), Duration::ZERO).is_none());
+    assert!(
+        detector
+            .update(point(0.0, 50.0), Duration::from_millis(100))
+            .is_some()
+    );
+    detector.suspend();
+    detector.set_armed_sides(ArmedSides::from_sides([EdgeSide::Left, EdgeSide::Top]));
+    assert!(detector.is_latched());
+    // Still pinned to the crossed edge long after the cooldown: no retrigger.
+    for millis in [800, 1_000, 1_200] {
+        assert!(
+            detector
+                .update(point(0.0, 50.0), Duration::from_millis(millis))
+                .is_none()
+        );
+    }
+    assert!(
+        detector
+            .update(point(30.0, 50.0), Duration::from_millis(1_300))
+            .is_none()
+    );
+    assert!(!detector.is_latched());
+}
+
+#[test]
+fn arrival_inset_is_outside_contact_band_even_for_exclusive_bounds() {
+    let params = EdgeDetectorParams::default();
+    // On exclusive right/bottom bounds the last reachable pixel is one unit
+    // inside the edge coordinate, so the arrival must clear tolerance + 1.
+    assert!(ARRIVAL_INSET > params.edge_tolerance + 1.0);
+    assert!(ARRIVAL_INSET < params.rearm_distance);
+
+    let display = rect(0.0, 0.0, 100.0, 100.0);
+    let mut detector = EdgeDetector::new(
+        ExposedEdges::from_displays(&[display]),
+        ArmedSides::ALL,
+        dwell_params(),
+    );
+    for (millis, position) in [
+        (0, point(ARRIVAL_INSET, 50.0)),
+        (300, point(ARRIVAL_INSET, 50.0)),
+        (600, point(100.0 - ARRIVAL_INSET, 50.0)),
+        (900, point(100.0 - ARRIVAL_INSET, 50.0)),
+    ] {
+        assert!(
+            detector
+                .update(position, Duration::from_millis(millis))
+                .is_none()
+        );
+    }
+}

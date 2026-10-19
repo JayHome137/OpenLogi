@@ -5680,7 +5680,9 @@ version = "0.8.14"
 dependencies = [
  "axwatch",
  "buffa",
+ "dispatch2",
  "futures-lite",
+ "gethostname",
  "objc2 0.6.4",
  "objc2-app-kit 0.3.2",
  "objc2-foundation 0.3.2",
@@ -5898,6 +5900,7 @@ dependencies = [
  "rcgen",
  "rustls",
  "sha2 0.10.9",
+ "socket2",
  "subtle",
  "thiserror 2.0.18",
  "tokio",

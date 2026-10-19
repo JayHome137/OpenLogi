@@ -73,6 +73,22 @@ fn empty_flow_section_uses_defaults() {
 }
 
 #[test]
+fn flow_clipboard_sharing_defaults_on_and_persists_only_when_off() {
+    assert!(FlowConfig::default().clipboard);
+    let off: Config = toml::from_str("schema_version = 7\n[flow]\nclipboard = false\n")
+        .expect("clipboard toggle must parse");
+    assert!(!off.flow.clipboard);
+    let written = toml::to_string_pretty(&off).expect("serialize");
+    assert!(written.contains("clipboard = false"));
+    let reparsed: Config = toml::from_str(&written).expect("reparse");
+    assert_eq!(reparsed.flow, off.flow);
+
+    let on: Config = toml::from_str("schema_version = 7\n[flow]\nclipboard = true\n")
+        .expect("explicit default must parse");
+    assert_eq!(on.flow, FlowConfig::default());
+}
+
+#[test]
 fn malformed_flow_entries_are_rejected() {
     for source in [
         "schema_version = 7\n[flow]\nunknown = true\n",

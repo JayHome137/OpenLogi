@@ -356,6 +356,8 @@ pub(super) async fn handle_rpc(state: Arc<GenerationState>, peer: PublicKey, eve
     let RpcEvent::Request(rpc) = event else {
         return;
     };
+    // With clipboard sharing off the local generation has been forgotten, so
+    // both fetch kinds below answer "unavailable" rather than serving data.
     if rpc.request().kind == FrameKind::ClipboardFetch {
         let Ok(request) = rpc
             .request()
@@ -694,6 +696,9 @@ pub(super) async fn handle_notification(
             else {
                 return;
             };
+            if !state.config.clipboard {
+                return;
+            }
             // Prefetch into the Flow clipboard cache, but do not touch the host
             // clipboard until the input hook observes Cmd/Ctrl+V.
             if let Some((sequence, mime)) = state.clipboard.accept_announce(peer, &announce).await {

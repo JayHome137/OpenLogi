@@ -4,6 +4,9 @@
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
+};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
     MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
@@ -27,6 +30,10 @@ const WHEEL_DELTA_F64: f64 = 120.0;
     reason = "the range checks bound rounded coordinates to Win32 i32 screen coordinates"
 )]
 pub(super) fn warp_cursor(x: f64, y: f64) -> bool {
+    // Flow computes the target from physical monitor rectangles; make
+    // SetCursorPos read them as physical pixels too, whatever DPI awareness
+    // the process ended up with.
+    let _physical = PhysicalPixelScope::enter();
     if !x.is_finite()
         || !y.is_finite()
         || x < f64::from(i32::MIN)
@@ -38,6 +45,45 @@ pub(super) fn warp_cursor(x: f64, y: f64) -> bool {
     }
     // SAFETY: both coordinates are finite and inside the Win32 screen-coordinate range.
     unsafe { SetCursorPos(x.round() as i32, y.round() as i32) != 0 }
+}
+
+/// Runs the calling thread per-monitor-v2 DPI aware until dropped.
+///
+/// Screen-coordinate APIs (`GetMonitorInfoW`, `GetCursorPos`, `SetCursorPos`)
+/// answer in the *calling thread's* DPI awareness: physical pixels when it is
+/// per-monitor aware, DPI-virtualized logical pixels otherwise. `WH_MOUSE_LL`
+/// cursor samples are always physical, so every Flow geometry query and the
+/// arrival warp enter this scope to stay in that one space instead of
+/// depending on how (or whether) the process declared DPI awareness. The
+/// previous thread context is restored on drop. On Windows builds without
+/// per-thread awareness (before 10 1607) entering is a no-op.
+#[must_use = "the DPI awareness lasts only while the scope is alive"]
+pub struct PhysicalPixelScope {
+    previous: DPI_AWARENESS_CONTEXT,
+}
+
+impl PhysicalPixelScope {
+    /// Switch the calling thread to per-monitor-v2 awareness.
+    pub fn enter() -> Self {
+        // SAFETY: the argument is a predefined awareness context constant;
+        // the call only changes this thread's awareness and returns the
+        // previous context, or null on failure.
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        Self { previous }
+    }
+}
+
+impl Drop for PhysicalPixelScope {
+    fn drop(&mut self) {
+        if !self.previous.is_null() {
+            // SAFETY: `previous` is the context SetThreadDpiAwarenessContext
+            // returned for this same thread in `enter`.
+            unsafe {
+                SetThreadDpiAwarenessContext(self.previous);
+            }
+        }
+    }
 }
 
 static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =

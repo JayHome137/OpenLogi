@@ -170,6 +170,10 @@ impl HookBackend for Backend {
     }
 
     fn cursor_position() -> Option<CursorPosition> {
+        // The physical → DIP conversion below assumes physical input; make
+        // GetCursorPos/MonitorFromPoint answer in physical pixels regardless
+        // of the process's declared DPI awareness.
+        let _physical = openlogi_inject::PhysicalPixelScope::enter();
         let mut point = POINT { x: 0, y: 0 };
         // SAFETY: `point` is a valid writable POINT for the duration of the call.
         if unsafe { GetCursorPos(&raw mut point) } == 0 {
@@ -488,6 +492,11 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
                 delta_x,
                 delta_y,
                 cursor: Some(CursorSample {
+                    // `MSLLHOOKSTRUCT::pt` is in per-monitor-aware (physical)
+                    // screen coordinates independent of this process's DPI
+                    // awareness; `display_rects` and `warp_cursor` query in
+                    // that same space, so Flow never mixes physical and
+                    // DPI-virtualized coordinates.
                     position: CursorPosition {
                         x: f64::from(data.pt.x),
                         y: f64::from(data.pt.y),
