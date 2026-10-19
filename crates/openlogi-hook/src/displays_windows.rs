@@ -12,7 +12,13 @@ use windows_sys::Win32::Graphics::Gdi::{
 use crate::edge::DisplayRect;
 
 /// Read every monitor in the virtual desktop's physical screen coordinates.
+///
+/// Queried per-monitor-v2 DPI aware so the rectangles are physical pixels,
+/// the same space as `WH_MOUSE_LL` cursor samples and the arrival warp, even
+/// when the process itself is DPI unaware or system aware (where
+/// `GetMonitorInfoW` would return DPI-virtualized bounds).
 pub(super) fn display_rects() -> Option<Vec<DisplayRect>> {
+    let _physical = openlogi_inject::PhysicalPixelScope::enter();
     let mut displays = Vec::new();
     let context = (&raw mut displays) as LPARAM;
     // SAFETY: `context` points to the live vector for the synchronous callback
