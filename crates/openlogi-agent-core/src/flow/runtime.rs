@@ -1140,21 +1140,38 @@ async fn run_application_connection(
     peer: PublicKey,
     connection: Arc<FlowConnection>,
 ) {
-    loop {
-        tokio::select! {
-            rpc = connection.accept_rpc() => match rpc {
+    // One loop per stream kind, never a `select!` over both accepts: neither
+    // is cancel-safe, so the losing branch would drop a stream it had already
+    // accepted, and the request or notification on it. A single stream the
+    // peer reset or garbled is skipped; only a lost connection ends a loop.
+    let rpcs = async {
+        loop {
+            match connection.accept_rpc().await {
                 Ok(event @ (RpcEvent::Request(_) | RpcEvent::Rejected(_))) => {
                     handle_rpc(Arc::clone(&state), peer, event).await;
                 }
-                Err(_) => return,
-            },
-            notification = connection.accept_notification() => match notification {
-                Ok(event @ (NotificationEvent::Notification(_) | NotificationEvent::Dropped(_))) => {
+                Err(error) if error.is_connection_lost() => return,
+                Err(error) => debug!(%error, "Flow request stream failed"),
+            }
+        }
+    };
+    let notifications = async {
+        loop {
+            match connection.accept_notification().await {
+                Ok(
+                    event @ (NotificationEvent::Notification(_) | NotificationEvent::Dropped(_)),
+                ) => {
                     handle_notification(Arc::clone(&state), peer, event).await;
                 }
-                Err(_) => return,
-            },
+                Err(error) if error.is_connection_lost() => return,
+                Err(error) => debug!(%error, "Flow notification stream failed"),
+            }
         }
+    };
+    // The connection is gone once either accept says so.
+    tokio::select! {
+        () = rpcs => {}
+        () = notifications => {}
     }
 }
 
