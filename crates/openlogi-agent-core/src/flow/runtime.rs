@@ -585,6 +585,9 @@ pub(super) struct GenerationState {
     /// `0x1814`), by config key. Announced in place of the config-derived
     /// guess once known.
     device_host_counts: RwLock<HashMap<String, u8>>,
+    /// Set while a [`probe_host_counts`] pass runs, so inventory churn does
+    /// not stack concurrent reads of the same devices.
+    probing_host_counts: AtomicBool,
     connections: RwLock<HashMap<PublicKey, Arc<FlowConnection>>>,
     link_states: RwLock<HashMap<PublicKey, LinkState>>,
     remote_states: RwLock<HashMap<PublicKey, RemotePeerState>>,
@@ -630,6 +633,7 @@ impl GenerationState {
             config,
             devices: RwLock::new(devices),
             device_host_counts: RwLock::new(HashMap::new()),
+            probing_host_counts: AtomicBool::new(false),
             connections: RwLock::new(HashMap::new()),
             link_states: RwLock::new(HashMap::new()),
             remote_states: RwLock::new(HashMap::new()),
@@ -982,11 +986,27 @@ fn announced_host_count(
 /// never interleaves with a host switch. A device that cannot report its
 /// count keeps the config-derived value.
 async fn probe_host_counts(state: Arc<GenerationState>) {
+    if state.probing_host_counts.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    probe_pending_host_counts(&state).await;
+    state.probing_host_counts.store(false, Ordering::Release);
+}
+
+async fn probe_pending_host_counts(state: &GenerationState) {
     let mut changed = false;
-    for (config_key, route) in state.host_count_targets() {
+    // Re-list after every read so a device that comes online mid-pass is
+    // still read; each device is tried once per pass.
+    let mut attempted = std::collections::HashSet::new();
+    while let Some((config_key, route)) = state
+        .host_count_targets()
+        .into_iter()
+        .find(|(key, _)| !attempted.contains(key))
+    {
         if !state.is_active() {
             return;
         }
+        attempted.insert(config_key.clone());
         let result = {
             let _lease = state.receiver_access.acquire_for_io().await;
             openlogi_hid::read_host_count(&state.channel_pool, &route).await
@@ -2275,6 +2295,23 @@ mod tests {
         };
         assert_eq!(host_count(&state), 2, "config maps hosts 0 and 1");
         assert_eq!(state.host_count_targets().len(), 1);
+
+        // A device that cannot be read keeps the config value, and the pass
+        // ends (each device is tried once) instead of spinning on it.
+        let state = Arc::new(state);
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            probe_host_counts(Arc::clone(&state)),
+        )
+        .await
+        .expect("an unreadable device ends the probe pass");
+        assert!(!state.probing_host_counts.load(Ordering::Acquire));
+        assert_eq!(host_count(&state), 2);
+        assert_eq!(
+            state.host_count_targets().len(),
+            1,
+            "retried on the next update"
+        );
 
         let revision = state.device_revision.load(Ordering::Relaxed);
         assert!(state.record_host_count(&device.config_key, 3));
