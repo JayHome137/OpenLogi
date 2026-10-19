@@ -25,11 +25,22 @@ pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: Edg
         return;
     }
     tokio::spawn(async move {
-        run_outgoing(&state, crossing).await;
+        // A crossing here means the devices are here: settle any transfer
+        // still waiting for the inventory to notice them.
+        if let Some(completed) = state.handoffs.complete_on_departure().await {
+            super::finish_incoming(Arc::clone(&state), completed).await;
+        }
+        let acknowledgment = run_outgoing(&state, crossing).await;
+        // The devices are gone, so nothing here can cross again until they
+        // come back, and when they do that crossing must not queue behind
+        // this transfer's arrival acknowledgment (up to its whole deadline).
         state
             .handoffs
             .sender_busy
             .store(false, std::sync::atomic::Ordering::Release);
+        if let Some(acknowledgment) = acknowledgment {
+            await_acknowledgment(&state, acknowledgment).await;
+        }
     });
 }
 
@@ -43,8 +54,9 @@ struct OutgoingPlan {
 /// Validates a crossing under the lifecycle lock and releases it again.
 ///
 /// The lock is held only for this snapshot and later around the host switch
-/// itself, never across the network round trips (up to ~2 s for acceptance
-/// and ~12 s for the arrival acknowledgment). Holding it for the whole
+/// itself, never across the network round trips (up to ~2 s for acceptance,
+/// and the arrival acknowledgment, awaited once the lock and the busy flag
+/// are released). Holding it for the whole
 /// transaction stalled config reloads (`shutdown`), link-state updates and
 /// incoming handoffs for as long as the peer took to answer.
 async fn plan_outgoing(state: &GenerationState, crossing: EdgeCrossing) -> Option<OutgoingPlan> {
@@ -76,15 +88,25 @@ async fn plan_outgoing(state: &GenerationState, crossing: EdgeCrossing) -> Optio
     })
 }
 
-async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
-    let Some(OutgoingPlan {
+/// A switched transfer still waiting for the receiver's arrival result.
+struct Acknowledgment {
+    peer: String,
+    transfer_id: u64,
+    deadline: Duration,
+    result: tokio::sync::oneshot::Receiver<OutgoingSignal>,
+}
+
+/// Run one outgoing handoff up to the host switch; returns the pending
+/// acknowledgment when the switch was issued.
+async fn run_outgoing(
+    state: &Arc<GenerationState>,
+    crossing: EdgeCrossing,
+) -> Option<Acknowledgment> {
+    let OutgoingPlan {
         peer,
         connection,
         targets,
-    }) = plan_outgoing(state, crossing).await
-    else {
-        return;
-    };
+    } = plan_outgoing(state, crossing).await?;
 
     let transfer_id = random_transfer_id();
     let mut request = proto::HandoffRequest {
@@ -98,7 +120,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
     };
     *request.entry.get_or_insert_default() = entry_from_crossing(crossing);
     let Ok(envelope) = message_envelope(FrameKind::HandoffRequest, &request) else {
-        return;
+        return None;
     };
     // Register before opening the RPC stream: QUIC does not order the response
     // stream against the receiver's HandoffResult notification stream.
@@ -109,7 +131,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
     let Some(deadline) = request_acceptance(&connection, &peer.name, transfer_id, envelope).await
     else {
         state.handoffs.remove_outgoing(transfer_id).await;
-        return;
+        return None;
     };
     // A config reload deactivates a generation at this lock boundary: the
     // host switch runs entirely on the generation that accepted, or not at
@@ -120,7 +142,10 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
         state.switch_devices(&targets).await
     };
     match switched {
-        Ok(true) => {}
+        Ok(true) => {
+            // Peers see the devices gone now, not once the inventory notices.
+            state.publish_device_state().await;
+        }
         Ok(false) => {
             state.handoffs.remove_outgoing(transfer_id).await;
             state
@@ -130,7 +155,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
                     proto::HandoffCancelReason::Shutdown,
                 )
                 .await;
-            return;
+            return None;
         }
         Err(error) => {
             state.handoffs.remove_outgoing(transfer_id).await;
@@ -142,25 +167,41 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
                     proto::HandoffCancelReason::SwitchFailed,
                 )
                 .await;
-            return;
+            return None;
         }
     }
 
+    Some(Acknowledgment {
+        peer: peer.name,
+        transfer_id,
+        deadline,
+        result,
+    })
+}
+
+/// Log how the receiver reported the transfer's arrival.
+async fn await_acknowledgment(state: &GenerationState, acknowledgment: Acknowledgment) {
+    let Acknowledgment {
+        peer,
+        transfer_id,
+        deadline,
+        result,
+    } = acknowledgment;
     match tokio::time::timeout(deadline, result).await {
         Ok(Ok(OutgoingSignal::Result(result))) => {
             info!(
-                peer = %peer.name,
+                peer,
                 transfer_id,
                 outcome = result.outcome.to_i32(),
                 "Flow handoff completed"
             );
         }
         Ok(Ok(OutgoingSignal::Cancelled)) => {
-            debug!(peer = %peer.name, transfer_id, "Flow handoff cancelled by peer");
+            debug!(peer, transfer_id, "Flow handoff cancelled by peer");
         }
         Ok(Err(_)) | Err(_) => {
             state.handoffs.remove_outgoing(transfer_id).await;
-            warn!(peer = %peer.name, transfer_id, "Flow arrival acknowledgment timed out");
+            warn!(peer, transfer_id, "Flow arrival acknowledgment timed out");
         }
     }
 }
