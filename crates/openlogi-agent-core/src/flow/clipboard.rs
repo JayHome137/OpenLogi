@@ -757,6 +757,7 @@ fn collect_files(paths: Vec<PathBuf>) -> Option<LocalFileSet> {
     })
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn persist_received_files(files: &[(String, Vec<u8>)]) -> Result<Vec<PathBuf>, String> {
     validate_file_payloads(files)?;
     let root = openlogi_core::paths::data_dir()
@@ -852,6 +853,7 @@ fn validate_file_entries(entries: &[proto::FileEntry]) -> Result<(), ClipboardEr
     Ok(())
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn validate_file_payloads(files: &[(String, Vec<u8>)]) -> Result<(), String> {
     if files.is_empty() || files.len() > MAX_FILE_COUNT {
         return Err("file list has an invalid number of files".to_owned());

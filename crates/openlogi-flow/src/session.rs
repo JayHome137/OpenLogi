@@ -270,7 +270,6 @@ impl SessionManager {
     }
 
     /// Iterates all configured peer handles in public-key order.
-    #[must_use]
     pub fn peers(&self) -> impl ExactSizeIterator<Item = &PeerSessionHandle> {
         self.peers.values()
     }
