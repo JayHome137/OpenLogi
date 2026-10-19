@@ -5,7 +5,7 @@ use hidpp::channel::HidppChannel;
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, PendingHostSwitchRestore,
     ReportingMode, event_host, host_change_required, host_channel, prepare_host_change_on,
-    restoration_change, rollback_host_switch_start, shares_channel,
+    read_host_count_on, restoration_change, rollback_host_switch_start, shares_channel,
 };
 use crate::backend::NodeId;
 use crate::channel::scripted::{
@@ -95,6 +95,14 @@ fn scripted_keyboard(request: &[u8], slot_status: SlotStatus) -> Option<Vec<u8>>
         }
         // ChangeHost getHostInfo: three RF channels, currently on host 0.
         (CHANGE_HOST_INDEX, 0x00) => payload[..2].copy_from_slice(&[3, 0]),
+        // HostsInfo getFeatureInfo: four slots. Deliberately not ChangeHost's
+        // three, so a test can tell which feature a count came from.
+        (HOSTS_INFO_INDEX, 0x00) => {
+            if slot_status == SlotStatus::ReadErrors {
+                return Some(feature_error(request, BUSY));
+            }
+            payload[..3].copy_from_slice(&[0x00, 0x00, 4]);
+        }
         // HostsInfo getHostInfo: echo the slot, then its pairing status.
         (HOSTS_INFO_INDEX, 0x01) => {
             if slot_status == SlotStatus::ReadErrors {
@@ -439,4 +447,21 @@ fn analytics_cleanup_restores_the_original_analytics_bit() {
     assert_eq!(change.analytics_key_events, Some(true));
     assert_eq!(change.diverted, None);
     assert_eq!(change.raw_xy, None);
+}
+
+#[tokio::test]
+async fn host_count_comes_from_hosts_info_when_the_device_has_it() {
+    let channel = scripted_channel(keyboard_with_an_empty_third_slot).await;
+    assert_eq!(read_host_count_on(channel, 1).await.expect("host count"), 4);
+}
+
+#[tokio::test]
+async fn host_count_falls_back_to_change_host() {
+    for responder in [
+        keyboard_without_hosts_info as crate::channel::scripted::Responder,
+        keyboard_erroring_on_slot_status,
+    ] {
+        let channel = scripted_channel(responder).await;
+        assert_eq!(read_host_count_on(channel, 1).await.expect("host count"), 3);
+    }
 }

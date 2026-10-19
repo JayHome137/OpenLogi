@@ -361,6 +361,56 @@ pub async fn switch_hosts(
     Ok(())
 }
 
+/// Read how many Easy-Switch host slots the device at `route` has.
+///
+/// Prefers `0x1815 HostsInfo`, which reports the slot count independently of
+/// the current host; falls back to `0x1814 ChangeHost` for devices without it.
+pub async fn read_host_count(
+    channel_pool: &ChannelPool,
+    route: &DeviceRoute,
+) -> Result<u8, HostSwitchError> {
+    let channel = open_channel(channel_pool, route, "opening device channel for host count")
+        .await?
+        .ok_or(HostSwitchError::TargetNotFound)?;
+    read_host_count_on(channel, route.device_index()).await
+}
+
+async fn read_host_count_on(
+    channel: Arc<HidppChannel>,
+    device_index: u8,
+) -> Result<u8, HostSwitchError> {
+    let mut device = timed_hidpp(
+        "opening host-count device",
+        Device::new(channel, device_index),
+    )
+    .await?;
+    if let Some(info) = timed_hidpp(
+        "locating hosts-info feature",
+        device.root().get_feature(HostsInfoFeature::ID),
+    )
+    .await?
+    {
+        let hosts_info = device.add_feature::<HostsInfoFeature>(info.index);
+        match timed_hidpp("reading host count", hosts_info.get_feature_info()).await {
+            Ok(info) if info.host_count > 0 => return Ok(info.host_count),
+            Ok(_) => debug!("hosts-info reports no slots; asking change-host"),
+            Err(error) => debug!(%error, "hosts-info count unreadable; asking change-host"),
+        }
+    }
+    let info = timed_hidpp(
+        "locating host-change feature",
+        device.root().get_feature(ChangeHostFeature::ID),
+    )
+    .await?
+    .ok_or(HostSwitchError::FeatureUnsupported)?;
+    let change_host = device.add_feature::<ChangeHostFeature>(info.index);
+    Ok(
+        timed_hidpp("reading host count", change_host.get_host_info())
+            .await?
+            .host_count,
+    )
+}
+
 /// Switch one device on an already-open shared channel to a host slot.
 pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, HostSwitchError> {
     let change = prepare_host_change_on(shared.channel(), shared.device_index(), host).await?;

@@ -34,7 +34,7 @@ use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
 use tokio::task::JoinHandle;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 use super::clipboard::ClipboardManager;
 use super::config::CompiledFlowConfig;
@@ -203,7 +203,8 @@ impl FlowGeneration {
         let pairing_reserved = Arc::new(AtomicBool::new(false));
         let pairing_window = Arc::new(AtomicBool::new(false));
         let handles: Vec<_> = sessions.peers().cloned().collect();
-        let mut tasks = Vec::with_capacity(handles.len() * 2 + 2);
+        let mut tasks = Vec::with_capacity(handles.len() * 2 + 3);
+        tasks.push(tokio::spawn(probe_host_counts(Arc::clone(&state))));
         if state.config.clipboard {
             tasks.push(tokio::spawn(run_clipboard_loop(Arc::clone(&state))));
         } else {
@@ -548,6 +549,9 @@ impl FlowGeneration {
 
     async fn update_devices(&self, snapshots: &[FlowDeviceSnapshot]) {
         self.state.update_devices(snapshots);
+        if !self.state.host_count_targets().is_empty() {
+            tokio::spawn(probe_host_counts(Arc::clone(&self.state)));
+        }
         self.state.publish_device_state().await;
         inventory_changed(Arc::clone(&self.state)).await;
     }
@@ -577,6 +581,10 @@ pub(super) struct GenerationState {
     /// place by a layout-only config reload, without restarting networking.
     layout: RwLock<HashMap<EdgeSide, usize>>,
     pub(super) devices: RwLock<Vec<RuntimeDevice>>,
+    /// Host-slot counts read from the devices themselves (`0x1815`, else
+    /// `0x1814`), by config key. Announced in place of the config-derived
+    /// guess once known.
+    device_host_counts: RwLock<HashMap<String, u8>>,
     connections: RwLock<HashMap<PublicKey, Arc<FlowConnection>>>,
     link_states: RwLock<HashMap<PublicKey, LinkState>>,
     remote_states: RwLock<HashMap<PublicKey, RemotePeerState>>,
@@ -621,6 +629,7 @@ impl GenerationState {
             layout: RwLock::new(config.layout.clone()),
             config,
             devices: RwLock::new(devices),
+            device_host_counts: RwLock::new(HashMap::new()),
             connections: RwLock::new(HashMap::new()),
             link_states: RwLock::new(HashMap::new()),
             remote_states: RwLock::new(HashMap::new()),
@@ -668,6 +677,55 @@ impl GenerationState {
             self.device_revision.fetch_add(1, Ordering::Relaxed);
             self.peer_revision.fetch_add(1, Ordering::Relaxed);
         }
+    }
+
+    /// Online, routable devices whose host count has not been read yet.
+    fn host_count_targets(&self) -> Vec<(String, DeviceRoute)> {
+        let known = self
+            .device_host_counts
+            .read()
+            .map(|counts| counts.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        self.devices_snapshot()
+            .into_iter()
+            .filter(|device| device.snapshot.online && !known.contains(&device.snapshot.config_key))
+            .filter_map(|device| Some((device.snapshot.config_key, device.snapshot.route?)))
+            .collect()
+    }
+
+    /// Record a device-reported host count; true when the announced view
+    /// changed.
+    fn record_host_count(&self, config_key: &str, count: u8) -> bool {
+        let Ok(mut counts) = self.device_host_counts.write() else {
+            return false;
+        };
+        if counts.insert(config_key.to_owned(), count) == Some(count) {
+            return false;
+        }
+        drop(counts);
+        if let Some(device) = self
+            .devices_snapshot()
+            .into_iter()
+            .find(|device| device.snapshot.config_key == config_key)
+            && let Some((machine, &host)) = device.channels.iter().find(|(_, host)| **host >= count)
+        {
+            warn!(
+                device = config_key,
+                machine = machine.as_str(),
+                host = host + 1,
+                count,
+                "Flow device config names a host slot the device does not have"
+            );
+        }
+        self.device_revision.fetch_add(1, Ordering::Relaxed);
+        true
+    }
+
+    fn device_host_count(&self, config_key: &str) -> Option<u8> {
+        self.device_host_counts
+            .read()
+            .ok()
+            .and_then(|counts| counts.get(config_key).copied())
     }
 
     pub(super) fn devices_snapshot(&self) -> Vec<RuntimeDevice> {
@@ -899,6 +957,53 @@ impl GenerationState {
     }
 }
 
+/// The host-slot count announced for a device: what the device reported, or,
+/// until it has been read (or when it cannot be), the smallest count the
+/// configured channels imply.
+fn announced_host_count(
+    device_reported: Option<u8>,
+    channels: &std::collections::BTreeMap<String, u8>,
+) -> u32 {
+    device_reported.filter(|&count| count > 0).map_or_else(
+        || {
+            channels
+                .values()
+                .copied()
+                .max()
+                .map_or(0, |host| u32::from(host) + 1)
+        },
+        u32::from,
+    )
+}
+
+/// Read each online device's host-slot count from the device and announce it.
+///
+/// Runs off the controller loop; holds a receiver I/O lease per read so it
+/// never interleaves with a host switch. A device that cannot report its
+/// count keeps the config-derived value.
+async fn probe_host_counts(state: Arc<GenerationState>) {
+    let mut changed = false;
+    for (config_key, route) in state.host_count_targets() {
+        if !state.is_active() {
+            return;
+        }
+        let result = {
+            let _lease = state.receiver_access.acquire_for_io().await;
+            openlogi_hid::read_host_count(&state.channel_pool, &route).await
+        };
+        match result {
+            Ok(count) if count > 0 => changed |= state.record_host_count(&config_key, count),
+            Ok(_) => debug!(device = config_key, "Flow device reports no host slots"),
+            Err(error) => {
+                debug!(device = config_key, %error, "Flow device host count unreadable; using config");
+            }
+        }
+    }
+    if changed && state.is_active() {
+        state.publish_device_state().await;
+    }
+}
+
 impl TrustedStateProvider for GenerationState {
     fn initial_state(&self, _peer_key: PublicKey) -> TrustedInitialState {
         let devices = self.devices_snapshot();
@@ -912,12 +1017,10 @@ impl TrustedStateProvider for GenerationState {
                                 device.channels.get("self").copied().unwrap_or_default(),
                             ),
                             connected: device.snapshot.online,
-                            host_count: device
-                                .channels
-                                .values()
-                                .copied()
-                                .max()
-                                .map_or(0, |host| u32::from(host) + 1),
+                            host_count: announced_host_count(
+                                self.device_host_count(&device.snapshot.config_key),
+                                &device.channels,
+                            ),
                             ..Default::default()
                         };
                         *view.identity.get_or_insert_default() = device.identity.clone();
@@ -2130,6 +2233,58 @@ mod tests {
         assert_eq!(machine_name_from(None, Some("")), "OpenLogi");
         assert_eq!(machine_name_from(Some(".local"), None), "OpenLogi");
         assert!(!machine_name().is_empty());
+    }
+
+    #[test]
+    fn announced_host_count_prefers_the_device_over_the_config() {
+        let channels = std::collections::BTreeMap::from([("self".into(), 0), ("desk".into(), 1)]);
+        assert_eq!(announced_host_count(None, &channels), 2);
+        assert_eq!(announced_host_count(Some(0), &channels), 2);
+        assert_eq!(announced_host_count(Some(3), &channels), 3);
+        assert_eq!(
+            announced_host_count(None, &std::collections::BTreeMap::new()),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn device_reported_host_count_replaces_the_config_guess_once_read() {
+        let device = test_device("mouse", 0xb35b, DeviceKind::Mouse, "flow-mouse");
+        let pool = ChannelPool::with_backend(Arc::new(
+            ReplayBackend::new(
+                ReplayTopology {
+                    nodes: Vec::new(),
+                    channels: Vec::new(),
+                },
+                Vec::new(),
+            )
+            .expect("empty replay backend"),
+        ));
+        let state = test_generation(
+            PublicKey::new([7; 32]),
+            "desk",
+            std::slice::from_ref(&device),
+            pool,
+        );
+        let host_count = |state: &GenerationState| {
+            state
+                .initial_state(PublicKey::new([0; 32]))
+                .announce_devices
+                .devices[0]
+                .host_count
+        };
+        assert_eq!(host_count(&state), 2, "config maps hosts 0 and 1");
+        assert_eq!(state.host_count_targets().len(), 1);
+
+        let revision = state.device_revision.load(Ordering::Relaxed);
+        assert!(state.record_host_count(&device.config_key, 3));
+        assert!(!state.record_host_count(&device.config_key, 3));
+        assert_eq!(host_count(&state), 3);
+        assert!(state.device_revision.load(Ordering::Relaxed) > revision);
+        assert!(
+            state.host_count_targets().is_empty(),
+            "a device is read once per generation"
+        );
     }
 
     #[test]
