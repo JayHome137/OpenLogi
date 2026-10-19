@@ -59,6 +59,9 @@ struct Movement {
 
 pub(super) enum Control {
     Reconfigure(FlowConfig),
+    /// A reload that changed only `[[flow.layout]]` (and possibly
+    /// `require_modifier`): re-map edges on the running generation.
+    Relayout(FlowConfig),
     Devices(Vec<FlowDeviceSnapshot>),
     Crossing(EdgeCrossing),
     PairCompleted,
@@ -169,9 +172,21 @@ impl FlowController {
     }
 
     /// Apply a live `[flow]` config reload.
+    ///
+    /// Every agent config reload lands here, most of them for unrelated
+    /// settings. Only a change to the `[flow]` section touches Flow, and only
+    /// a change beyond the edge layout and modifier restarts networking.
     pub fn update_config(&self, config: &FlowConfig) {
-        if let Ok(mut current) = self.inner.config.write() {
-            *current = config.clone();
+        let change = match self.inner.config.write() {
+            Ok(mut current) => {
+                let change = classify_change(&current, config);
+                *current = config.clone();
+                change
+            }
+            Err(_) => FlowChange::Restart,
+        };
+        if change == FlowChange::None {
+            return;
         }
         let revision = self
             .inner
@@ -181,13 +196,12 @@ impl FlowController {
         if let Ok(mut settings) = self.inner.edge_settings.write() {
             *settings = edge_settings(config, revision);
         }
-        if self.inner.armed.load(Ordering::Acquire)
-            && self
-                .inner
-                .control_tx
-                .send(Control::Reconfigure(config.clone()))
-                .is_ok()
-        {
+        let command = match change {
+            FlowChange::None | FlowChange::Edges => return,
+            FlowChange::Layout => Control::Relayout(config.clone()),
+            FlowChange::Restart => Control::Reconfigure(config.clone()),
+        };
+        if self.inner.armed.load(Ordering::Acquire) && self.inner.control_tx.send(command).is_ok() {
             return;
         }
         self.inner.observable.set_flow(status_from_config(config));
@@ -297,6 +311,37 @@ impl FlowInputHandle {
     }
 }
 
+/// How far a `[flow]` reload reaches into the running Flow runtime.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FlowChange {
+    /// Nothing in `[flow]` changed.
+    None,
+    /// Only `require_modifier`: the edge input picks it up by itself.
+    Edges,
+    /// The edge layout changed (peers, devices and networking did not).
+    Layout,
+    /// Anything else: rebuild the generation.
+    Restart,
+}
+
+fn classify_change(current: &FlowConfig, next: &FlowConfig) -> FlowChange {
+    if current == next {
+        return FlowChange::None;
+    }
+    let networking = |config: &FlowConfig| FlowConfig {
+        require_modifier: false,
+        layout: Vec::new(),
+        ..config.clone()
+    };
+    if networking(current) != networking(next) {
+        FlowChange::Restart
+    } else if current.layout != next.layout {
+        FlowChange::Layout
+    } else {
+        FlowChange::Edges
+    }
+}
+
 fn status_from_config(config: &FlowConfig) -> FlowStatus {
     CompiledFlowConfig::compile(config).map_or_else(
         |_| FlowStatus {
@@ -339,10 +384,17 @@ async fn run_controller(
     while let Some(command) = control.recv().await {
         match command {
             Control::Reconfigure(config) => {
-                if let Some(active) = generation.take() {
-                    active.shutdown().await;
+                generation = restart_generation(&inner, generation, &config, &devices).await;
+            }
+            Control::Relayout(config) => {
+                let compiled = CompiledFlowConfig::compile(&config);
+                if let (Some(active), Ok(compiled)) = (generation.as_ref(), compiled) {
+                    active.state.set_layout(compiled.layout);
+                } else {
+                    // No running generation, or a layout that does not compile:
+                    // take the full path, which reports the error.
+                    generation = restart_generation(&inner, generation, &config, &devices).await;
                 }
-                generation = start_generation(&inner, &config, &devices).await;
             }
             Control::Devices(next) => {
                 devices = next;
@@ -426,6 +478,18 @@ async fn run_controller(
     if let Some(active) = generation {
         active.shutdown().await;
     }
+}
+
+async fn restart_generation(
+    inner: &Arc<ControllerInner>,
+    current: Option<FlowGeneration>,
+    config: &FlowConfig,
+    devices: &[FlowDeviceSnapshot],
+) -> Option<FlowGeneration> {
+    if let Some(active) = current {
+        active.shutdown().await;
+    }
+    start_generation(inner, config, devices).await
 }
 
 async fn start_generation(
@@ -589,6 +653,100 @@ mod tests {
                 peer: "desk".into(),
             }],
             ..FlowConfig::default()
+        }
+    }
+
+    #[test]
+    fn only_flow_networking_changes_restart_the_runtime() {
+        let base = configured(true, false);
+        assert_eq!(classify_change(&base, &base.clone()), FlowChange::None);
+
+        let modifier = FlowConfig {
+            require_modifier: true,
+            ..base.clone()
+        };
+        assert_eq!(classify_change(&base, &modifier), FlowChange::Edges);
+
+        let mut moved = base.clone();
+        moved.layout[0].edge = FlowEdge::Left;
+        assert_eq!(classify_change(&base, &moved), FlowChange::Layout);
+        let moved_and_modifier = FlowConfig {
+            require_modifier: true,
+            ..moved.clone()
+        };
+        assert_eq!(
+            classify_change(&base, &moved_and_modifier),
+            FlowChange::Layout
+        );
+
+        for restart in [
+            FlowConfig {
+                enabled: false,
+                ..base.clone()
+            },
+            FlowConfig {
+                clipboard: false,
+                ..base.clone()
+            },
+            FlowConfig {
+                peers: Vec::new(),
+                layout: Vec::new(),
+                ..base.clone()
+            },
+        ] {
+            assert_eq!(classify_change(&base, &restart), FlowChange::Restart);
+        }
+        let mut readdressed = base.clone();
+        readdressed.peers[0].addresses.push("10.0.0.7".into());
+        assert_eq!(classify_change(&base, &readdressed), FlowChange::Restart);
+    }
+
+    #[tokio::test]
+    async fn unrelated_reloads_do_not_reach_the_runtime() {
+        let (control_tx, mut control_rx) = mpsc::unbounded_channel();
+        let controller = test_controller(configured(true, false), control_tx);
+        controller.update_config(&configured(true, false));
+        assert!(control_rx.try_recv().is_err());
+
+        let mut moved = configured(true, false);
+        moved.layout[0].edge = FlowEdge::Top;
+        controller.update_config(&moved);
+        assert!(matches!(control_rx.try_recv(), Ok(Control::Relayout(_))));
+
+        controller.update_config(&FlowConfig::default());
+        assert!(matches!(control_rx.try_recv(), Ok(Control::Reconfigure(_))));
+    }
+
+    /// An armed controller whose control channel the test owns.
+    fn test_controller(
+        config: FlowConfig,
+        control_tx: mpsc::UnboundedSender<Control>,
+    ) -> FlowController {
+        let (movement_tx, _) = mpsc::channel(CONTROL_QUEUE);
+        FlowController {
+            inner: Arc::new(ControllerInner {
+                edge_settings: Arc::new(RwLock::new(edge_settings(&config, 0))),
+                config: RwLock::new(config),
+                devices: RwLock::new(Vec::new()),
+                observable: Arc::new(ObservableState::new("flow-controller-test".into())),
+                control_tx,
+                control_rx: Mutex::new(None),
+                movement_tx,
+                movement_rx: Mutex::new(None),
+                channel_pool: ChannelPool::with_backend(Arc::new(
+                    openlogi_hid::replay::ReplayBackend::new(
+                        openlogi_hid::replay::ReplayTopology {
+                            nodes: Vec::new(),
+                            channels: Vec::new(),
+                        },
+                        Vec::new(),
+                    )
+                    .expect("empty replay backend"),
+                )),
+                receiver_access: ReceiverAccess::default(),
+                clipboard: Arc::new(ClipboardManager::new(default_backend())),
+                armed: AtomicBool::new(true),
+            }),
         }
     }
 

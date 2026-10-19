@@ -40,10 +40,7 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
     if !state.is_active() {
         return;
     }
-    let Some(&peer_index) = state.config.layout.get(&crossing.side) else {
-        return;
-    };
-    let Some(peer) = state.config.peers.get(peer_index) else {
+    let Some(peer) = state.layout_peer(crossing.side) else {
         return;
     };
     let Some(connection) = state.connection(peer.public_key) else {

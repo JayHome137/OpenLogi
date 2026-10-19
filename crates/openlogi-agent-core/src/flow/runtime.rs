@@ -572,6 +572,9 @@ impl FlowGeneration {
 
 pub(super) struct GenerationState {
     pub(super) config: Arc<CompiledFlowConfig>,
+    /// Edge → peer-index mapping. Starts as `config.layout` and is replaced in
+    /// place by a layout-only config reload, without restarting networking.
+    layout: RwLock<HashMap<EdgeSide, usize>>,
     pub(super) devices: RwLock<Vec<RuntimeDevice>>,
     connections: RwLock<HashMap<PublicKey, Arc<FlowConnection>>>,
     link_states: RwLock<HashMap<PublicKey, LinkState>>,
@@ -614,6 +617,7 @@ impl GenerationState {
     ) -> Self {
         let devices = runtime_devices(&config, snapshots);
         Self {
+            layout: RwLock::new(config.layout.clone()),
             config,
             devices: RwLock::new(devices),
             connections: RwLock::new(HashMap::new()),
@@ -629,6 +633,20 @@ impl GenerationState {
             handoffs: HandoffBook::default(),
             clipboard,
             pairing_phase: RwLock::new(None),
+        }
+    }
+
+    /// The configured peer this machine's `side` hands off to.
+    pub(super) fn layout_peer(&self, side: EdgeSide) -> Option<&super::config::CompiledPeer> {
+        let index = *self.layout.read().ok()?.get(&side)?;
+        self.config.peers.get(index)
+    }
+
+    /// Apply a layout-only reload. Peer indexes refer to `self.config.peers`,
+    /// which a layout-only change leaves untouched.
+    pub(super) fn set_layout(&self, layout: HashMap<EdgeSide, usize>) {
+        if let Ok(mut current) = self.layout.write() {
+            *current = layout;
         }
     }
 
@@ -1861,6 +1879,35 @@ mod tests {
             Some((100.0 - ARRIVAL_INSET, 80.0 - ARRIVAL_INSET))
         );
         assert_eq!(point_on_edge(&edges, proto::Side::Unspecified, 0.5), None);
+    }
+
+    #[test]
+    fn layout_reload_remaps_edges_on_the_running_generation() {
+        let peer = PublicKey::new([7; 32]);
+        let empty_backend = Arc::new(
+            ReplayBackend::new(
+                ReplayTopology {
+                    nodes: Vec::new(),
+                    channels: Vec::new(),
+                },
+                Vec::new(),
+            )
+            .expect("empty replay backend"),
+        );
+        let state = test_generation(peer, "desk", &[], ChannelPool::with_backend(empty_backend));
+        assert_eq!(
+            state
+                .layout_peer(EdgeSide::Right)
+                .map(|peer| peer.name.as_str()),
+            Some("desk")
+        );
+        state.set_layout(HashMap::from([(EdgeSide::Top, 0)]));
+        assert!(state.layout_peer(EdgeSide::Right).is_none());
+        assert_eq!(
+            state.layout_peer(EdgeSide::Top).map(|peer| peer.public_key),
+            Some(peer)
+        );
+        assert!(state.is_active());
     }
 
     #[test]
