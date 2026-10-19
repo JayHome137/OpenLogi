@@ -533,9 +533,25 @@ mod tests {
             (cx.global::<WindowRegistry>().settings.unwrap(), commands)
         });
         let mut visual = VisualTestContext::from_window(handle.into(), cx);
-        visual.simulate_resize(size(px(920.), px(900.)));
+        // Tall enough that the pairing group is on screen with any platform's
+        // font metrics: a click below the viewport hits nothing.
+        visual.simulate_resize(size(px(920.), px(1600.)));
         visual.update(|window, cx| window.draw(cx).clear(cx));
         (visual, commands)
+    }
+
+    /// Click the element tagged `selector`, which must be on screen.
+    fn click(visual: &mut VisualTestContext, selector: &'static str) {
+        let bounds = visual
+            .debug_bounds(selector)
+            .unwrap_or_else(|| panic!("{selector} is not rendered"));
+        let viewport = visual.update(|window, _| window.viewport_size());
+        assert!(
+            bounds.bottom() <= viewport.height,
+            "{selector} at {bounds:?} is below the {viewport:?} viewport"
+        );
+        visual.simulate_click(bounds.center(), Modifiers::default());
+        visual.run_until_parked();
     }
 
     #[gpui::test]
@@ -555,8 +571,7 @@ mod tests {
         let (mut visual, mut commands) = open_flow_page(cx, Config::ephemeral(), &status);
         assert!(visual.debug_bounds("flow-pairing-code").is_some());
         assert!(visual.debug_bounds("flow-pair-start").is_none());
-        let confirm = visual.debug_bounds("flow-pair-confirm").unwrap();
-        visual.simulate_click(confirm.center(), Modifiers::default());
+        click(&mut visual, "flow-pair-confirm");
         assert!(matches!(
             commands.try_recv(),
             Ok(crate::services::ipc::Command::FlowPairConfirm(_))
@@ -573,8 +588,7 @@ mod tests {
         };
         let (mut visual, mut commands) = open_flow_page(cx, Config::ephemeral(), &status);
         assert!(visual.debug_bounds("flow-pairing-note").is_none());
-        let listen = visual.debug_bounds("flow-pair-listen").unwrap();
-        visual.simulate_click(listen.center(), Modifiers::default());
+        click(&mut visual, "flow-pair-listen");
         assert!(matches!(
             commands.try_recv(),
             Ok(crate::services::ipc::Command::FlowPairListen(_))
