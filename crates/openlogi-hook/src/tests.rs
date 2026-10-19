@@ -68,6 +68,7 @@ fn negate_scroll_y_flips_only_scroll_events() {
     let moved = MouseEvent::Moved {
         delta_x: 1,
         delta_y: 2,
+        cursor: None,
     };
     assert_eq!(negate_scroll_y(moved.clone()), moved);
 }
