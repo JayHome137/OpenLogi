@@ -3,7 +3,7 @@ use strum::VariantArray as _;
 use super::super::identity;
 use super::*;
 use crate::support::fs::repo_root;
-use crate::support::info_plist::read_plist_string;
+use crate::support::info_plist::{read_plist_string, read_plist_value};
 
 /// Identity work iterates every `Component`, so a component added without a
 /// `EmbeddedHelper` to embed it would only surface as a stamping failure during a
@@ -170,4 +170,31 @@ fn verify_bundle_binaries_names_each_missing_binary() {
             missing.display()
         );
     }
+}
+
+/// Flow's networking runs in the agent, so the agent is the process macOS 15+
+/// asks Local Network permission for: it must explain why, and name the mDNS
+/// service it browses (`openlogi_flow::discovery::SERVICE_TYPE`).
+#[test]
+fn the_agent_plist_declares_its_local_network_use() {
+    let root = repo_root().unwrap();
+    let agent = HELPERS
+        .iter()
+        .find(|helper| helper.component == Component::Agent)
+        .expect("agent helper");
+    let plist = root.join(agent.info_plist);
+
+    let reason = read_plist_string(&plist, "NSLocalNetworkUsageDescription").unwrap();
+    assert!(reason.is_some_and(|reason| reason.contains("Flow")));
+    let services = read_plist_value(&plist, "NSBonjourServices")
+        .unwrap()
+        .and_then(plist::Value::into_array)
+        .expect("NSBonjourServices array");
+    assert_eq!(
+        services
+            .iter()
+            .filter_map(plist::Value::as_string)
+            .collect::<Vec<_>>(),
+        ["_openlogi-flow._udp"]
+    );
 }
