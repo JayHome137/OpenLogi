@@ -463,15 +463,16 @@ impl Agent for AgentServer {
     }
 
     async fn flow_set_enabled(self, _: Context, enabled: bool) -> Result<(), ConfigReloadError> {
-        let mut config = Config::load_or_default().map_err(|error| ConfigReloadError {
-            message: error.to_string(),
-        })?;
+        let (mut config, mut file) =
+            ConfigFile::load_or_default().map_err(|error| ConfigReloadError {
+                message: error.to_string(),
+            })?;
         config.flow.enabled = enabled;
         if enabled {
             openlogi_agent_core::FlowController::validate_config(&config.flow)
                 .map_err(|message| ConfigReloadError { message })?;
         }
-        config.save_atomic().map_err(|error| ConfigReloadError {
+        file.save(&config).map_err(|error| ConfigReloadError {
             message: error.to_string(),
         })?;
         self.orchestrator.lock().await.reload_config(config);
@@ -503,9 +504,10 @@ impl Agent for AgentServer {
         _: Context,
         layout: Vec<FlowLayout>,
     ) -> Result<(), ConfigReloadError> {
-        let mut config = Config::load_or_default().map_err(|error| ConfigReloadError {
-            message: error.to_string(),
-        })?;
+        let (mut config, mut file) =
+            ConfigFile::load_or_default().map_err(|error| ConfigReloadError {
+                message: error.to_string(),
+            })?;
         config.flow.layout = layout
             .into_iter()
             .map(|entry| openlogi_core::config::FlowLayout {
@@ -520,7 +522,7 @@ impl Agent for AgentServer {
             .collect();
         openlogi_agent_core::FlowController::validate_config(&config.flow)
             .map_err(|message| ConfigReloadError { message })?;
-        config.save_atomic().map_err(|error| ConfigReloadError {
+        file.save(&config).map_err(|error| ConfigReloadError {
             message: error.to_string(),
         })?;
         self.orchestrator.lock().await.reload_config(config);
