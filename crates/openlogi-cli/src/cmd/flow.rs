@@ -7,7 +7,7 @@ use clap::{Args, Subcommand};
 use openlogi_ipc::FlowCommandError;
 use tarpc::context;
 
-use crate::agent;
+use crate::agent::{self, CallFailure};
 
 /// Manage cross-machine Flow without opening hardware from the CLI process.
 #[derive(Debug, Args)]
@@ -96,9 +96,11 @@ async fn call_config(
 }
 
 async fn call_flow(
-    result: Result<Result<(), FlowCommandError>, tarpc::client::RpcError>,
+    call: impl Future<Output = Result<Result<(), FlowCommandError>, CallFailure>>,
 ) -> Result<(), anyhow::Error> {
-    let result = result.map_err(|error| anyhow!("Flow command transport failed: {error:?}"))?;
+    let result = call
+        .await
+        .map_err(|error| anyhow!("Flow command transport failed: {error:?}"))?;
     result.map_err(|error| anyhow!("Flow command failed: {error:?}"))
 }
 
