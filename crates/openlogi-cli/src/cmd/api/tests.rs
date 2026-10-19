@@ -16,6 +16,10 @@ use openlogi_ipc::{
 
 use super::*;
 
+mod easy_switch;
+mod persistence;
+mod report_rate;
+
 type Step = Box<dyn FnOnce(AgentRequest) -> AgentResponse + Send>;
 
 fn snapshot() -> AgentSnapshot {
@@ -46,6 +50,7 @@ fn snapshot() -> AgentSnapshot {
                 battery: None,
                 model_info: None,
                 capabilities: None,
+                settings_revision: 0,
             }],
         }],
         standalone: Vec::new(),
@@ -55,6 +60,7 @@ fn snapshot() -> AgentSnapshot {
             current: None,
             recent: Vec::new(),
         },
+        lights: Vec::new(),
         flow: FlowStatus::default(),
     }
 }
@@ -67,6 +73,15 @@ fn route() -> DeviceRoute {
 }
 
 async fn run_script(snapshot: AgentSnapshot, command: ApiCommand, steps: Vec<Step>) -> Value {
+    run_script_at(snapshot, command, steps, None).await
+}
+
+async fn run_script_at(
+    snapshot: AgentSnapshot,
+    command: ApiCommand,
+    steps: Vec<Step>,
+    path: Option<&Path>,
+) -> Value {
     let mut queue: VecDeque<Step> = VecDeque::new();
     queue.push_back(Box::new(move |request| {
         assert!(matches!(request, AgentRequest::Snapshot {}));
@@ -83,7 +98,7 @@ async fn run_script(snapshot: AgentSnapshot, command: ApiCommand, steps: Vec<Ste
         },
         pending(),
     );
-    let result = envelope(execute(&client, command).await);
+    let result = envelope(execute(&client, command, path).await);
     assert!(
         queue.lock().unwrap().is_empty(),
         "expected RPC was not sent"
@@ -276,6 +291,43 @@ async fn dpi_validates_supported_values_before_writing_and_checks_readback() {
 }
 
 #[tokio::test]
+async fn agent_side_dpi_rejections_use_the_same_codes_as_local_checks() {
+    for (error, code) in [
+        (
+            WriteError::DpiUnsupported {
+                requested: Dpi::from(1200),
+            },
+            "invalid_value",
+        ),
+        (
+            WriteError::DpiNotApplied {
+                requested: Dpi::from(1200),
+                actual: Dpi::from(400),
+            },
+            "readback_mismatch",
+        ),
+    ] {
+        let result = run_script(
+            snapshot(),
+            ApiCommand::Dpi {
+                device: route().to_string(),
+                set: Some(1200),
+            },
+            vec![
+                dpi_read(400),
+                Box::new(move |request| {
+                    assert!(matches!(request, AgentRequest::SetDpi { .. }));
+                    AgentResponse::SetDpi(Err(error))
+                }),
+            ],
+        )
+        .await;
+        assert_eq!(result["ok"], false);
+        assert_eq!(result["error"]["code"], code);
+    }
+}
+
+#[tokio::test]
 async fn smartshift_preserves_unspecified_fields_and_reads_back() {
     let before = SmartShiftStatus {
         mode: SmartShiftMode::Ratchet,
@@ -409,7 +461,7 @@ async fn read_only_settings_never_send_writes() {
             assert!(matches!(request, AgentRequest::ReadFnLock { .. }));
             AgentResponse::ReadFnLock(Ok(FnLockState {
                 fn_lock: false,
-                default_fn_lock: true,
+                default_fn_lock: Some(true),
             }))
         })],
     )
@@ -418,6 +470,34 @@ async fn read_only_settings_never_send_writes() {
     assert_eq!(fn_lock["data"]["default_fn_lock"], true);
 }
 
+#[tokio::test]
+async fn a_keyboard_without_a_default_reports_default_fn_lock_as_null() {
+    // A 0x40a0 keyboard reports its state but no default.
+    let fn_lock = run_script(
+        snapshot(),
+        ApiCommand::FnLock {
+            device: route().to_string(),
+            set: None,
+        },
+        vec![Box::new(|request| {
+            assert!(matches!(request, AgentRequest::ReadFnLock { .. }));
+            AgentResponse::ReadFnLock(Ok(FnLockState {
+                fn_lock: true,
+                default_fn_lock: None,
+            }))
+        })],
+    )
+    .await;
+    let data = fn_lock["data"]
+        .as_object()
+        .expect("fn-lock data is an object");
+    assert_eq!(data.get("fn_lock"), Some(&serde_json::Value::Bool(true)));
+    assert_eq!(
+        data.get("default_fn_lock"),
+        Some(&serde_json::Value::Null),
+        "the field stays in the output as null, not dropped or made false"
+    );
+}
 #[tokio::test]
 async fn device_write_failure_is_not_retried_or_reported_as_success() {
     let result = run_script(
@@ -465,7 +545,7 @@ async fn fn_lock_uses_explicit_state_and_returns_firmware_echo() {
                 assert_eq!(fn_lock, enabled);
                 AgentResponse::SetFnLock(Ok(FnLockState {
                     fn_lock: observed,
-                    default_fn_lock: false,
+                    default_fn_lock: Some(false),
                 }))
             })],
         )

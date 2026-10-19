@@ -14,6 +14,7 @@
 // crate this one already depends on for locale negotiation.
 rust_i18n::i18n!("../openlogi-ui/locales", fallback = "en");
 
+mod backlight;
 mod ipc;
 mod platform;
 mod ring;
@@ -23,15 +24,22 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use gpui::AppContext as _;
-use tracing::warn;
+use tracing::{debug, warn};
 
 use openlogi_core::action_ring::DISPLAY_LIFETIME;
 
+use crate::backlight::BacklightView;
 use crate::ipc::OverlayCommand;
 use crate::platform::RingPlacement;
 use crate::ring::RingView;
-use crate::session::{ClickAwaySession, claim_the_role, spawn_click_away_dismissal};
+use crate::session::{
+    ClickAwaySession, claim_the_role, close_ring_windows, spawn_click_away_dismissal,
+};
 
+#[expect(
+    clippy::too_many_lines,
+    reason = "the overlay bootstraps two independent IPC observation tasks"
+)]
 fn main() -> Result<()> {
     openlogi_core::logging::init_stderr();
 
@@ -40,12 +48,21 @@ fn main() -> Result<()> {
     let _tenancy = claim_the_role()?;
     let ipc::Handle {
         mut invocations,
+        mut backlights,
         commands,
     } = ipc::spawn();
 
     let mut app = gpui_platform::application().with_assets(openlogi_ui::action_icons::ActionIcons);
+    // Application construction establishes GPUI's NSApplication subclass.
+    // Asking AppKit for its singleton sooner creates a plain NSApplication,
+    // which lacks the `platform` ivar GPUI needs. Set Accessory policy now:
+    // GPUI owns the singleton, but `app.run` has not finished launching yet.
+    platform::configure_application();
     app = app.with_quit_mode(gpui::QuitMode::Explicit);
     app.run(move |cx| {
+        // GPUI's didFinishLaunching callback resets the policy to Regular.
+        // Reapply the helper policy after that reset, without constructing
+        // NSApplication before GPUI has installed its subclass.
         platform::configure_application();
         let live_session = Arc::new(ClickAwaySession::new());
         spawn_click_away_dismissal(cx, Arc::clone(&live_session));
@@ -57,7 +74,9 @@ fn main() -> Result<()> {
                 let Some(invocation) = observed else {
                     cx.update(|cx| {
                         for handle in cx.windows() {
-                            let _ = handle.update(cx, |_, window, _| window.remove_window());
+                            if handle.downcast::<RingView>().is_some() {
+                                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                            }
                         }
                     });
                     continue;
@@ -65,9 +84,18 @@ fn main() -> Result<()> {
                 openlogi_core::locale::activate(invocation.language.as_deref());
                 cx.update(|cx| {
                     for handle in cx.windows() {
-                        let _ = handle.update(cx, |_, window, _| window.remove_window());
+                        if handle.downcast::<RingView>().is_some() {
+                            let _ = handle.update(cx, |_, window, _| window.remove_window());
+                        }
                     }
-                    let placement = match RingPlacement::capture(cx) {
+                    #[cfg_attr(
+                        windows,
+                        expect(
+                            unused_mut,
+                            reason = "only the Wayland placement drains its openings"
+                        )
+                    )]
+                    let mut placement = match RingPlacement::capture(cx) {
                         Ok(placement) => placement,
                         Err(error) => {
                             warn!(%error, "could not locate Actions Ring display");
@@ -80,33 +108,86 @@ fn main() -> Result<()> {
                     let commands = commands.clone();
                     let timeout_commands = commands.clone();
                     let session_id = invocation.session_id;
-                    match cx.open_window(placement.window_options(), |_, cx| {
-                        cx.new(|_| RingView::new(invocation, commands, &live_session))
-                    }) {
-                        Ok(handle) => {
-                            if let Err(error) = handle
-                                .update(cx, |_, window, _| placement.show(window))
-                                .and_then(std::convert::identity)
-                            {
-                                warn!(%error, "could not position Actions Ring window");
-                                let _ = handle.update(cx, |_, window, _| window.remove_window());
-                                let _ =
-                                    timeout_commands.send(OverlayCommand::Cancel { session_id });
-                                return;
-                            }
-                            cx.spawn(async move |cx| {
-                                cx.background_executor().timer(DISPLAY_LIFETIME).await;
-                                if handle
-                                    .update(cx, |_, window, _| window.remove_window())
-                                    .is_ok()
-                                {
-                                    let _ = timeout_commands
-                                        .send(OverlayCommand::Cancel { session_id });
+                    // Wayland opens one window per display. One that fails to
+                    // open must not sink the others.
+                    let mut primary = None;
+                    for (options, panel) in placement.openings() {
+                        let invocation = invocation.clone();
+                        let commands = commands.clone();
+                        match cx.open_window(options, |_, cx| {
+                            cx.new(|_| RingView::new(invocation, commands, &live_session, panel))
+                        }) {
+                            Ok(handle) => {
+                                if primary.is_none() {
+                                    primary = Some(handle);
                                 }
-                            })
-                            .detach();
+                            }
+                            Err(error) => warn!(%error, "could not open Actions Ring window"),
                         }
-                        Err(error) => warn!(%error, "could not open Actions Ring window"),
+                    }
+                    let Some(primary) = primary else {
+                        return;
+                    };
+                    if let Err(error) = primary
+                        .update(cx, |_, window, cx| {
+                            // Native placement resizes the window inside this
+                            // update, where GPUI's own resize/move callbacks
+                            // cannot borrow the app. Resync its viewport and
+                            // scale, or it keeps rendering at the bootstrap size.
+                            placement.show(window).map(|()| window.bounds_changed(cx))
+                        })
+                        .and_then(std::convert::identity)
+                    {
+                        warn!(%error, "could not position Actions Ring window");
+                        close_ring_windows(cx, session_id);
+                        let _ = timeout_commands.send(OverlayCommand::Cancel { session_id });
+                        return;
+                    }
+                    cx.spawn(async move |cx| {
+                        cx.background_executor().timer(DISPLAY_LIFETIME).await;
+                        if cx.update(|cx| close_ring_windows(cx, session_id)) {
+                            let _ = timeout_commands.send(OverlayCommand::Cancel { session_id });
+                        }
+                    })
+                    .detach();
+                });
+            }
+        })
+        .detach();
+        cx.spawn(async move |cx| {
+            while let Some(observation) = backlights.recv().await {
+                debug!(
+                    level = observation.current_level,
+                    visible = observation.visible,
+                    "backlight observation received"
+                );
+                cx.update(|cx| {
+                    for handle in cx.windows() {
+                        if let Some(view) = handle.downcast::<BacklightView>() {
+                            let _ = view.update(cx, |view, _, cx| {
+                                view.observation = observation.clone();
+                                cx.notify();
+                            });
+                        }
+                    }
+                    if !observation.visible {
+                        for handle in cx.windows() {
+                            if handle.downcast::<BacklightView>().is_some() {
+                                let _ = handle.update(cx, |_, window, _| window.remove_window());
+                            }
+                        }
+                        return;
+                    }
+                    if cx
+                        .windows()
+                        .iter()
+                        .all(|handle| handle.downcast::<BacklightView>().is_none())
+                    {
+                        let options = backlight::window_options(cx);
+                        let opened = cx.open_window(options, |_, cx| {
+                            cx.new(|_| BacklightView::new(observation.clone()))
+                        });
+                        debug!(success = opened.is_ok(), "backlight window opened");
                     }
                 });
             }
