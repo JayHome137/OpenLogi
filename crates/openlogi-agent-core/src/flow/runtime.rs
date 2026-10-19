@@ -2157,7 +2157,7 @@ mod tests {
     #[test]
     fn pairing_save_keeps_an_edit_another_writer_made_after_our_load() {
         let directory = tempdir().expect("temporary directory");
-        let path = directory.path().join("config.toml");
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
         let mut seed = Config::default();
         seed.flow.peers.push(FlowPeer {
             name: "desk".to_owned(),
