@@ -63,8 +63,8 @@ use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentSnapshot, AgentStatus,
     BacklightObservation, ClientKind, ConfigReloadError, FlowCommandError, FlowLayout, FlowStatus,
     ForegroundApps, FoundDevice, Generation, Identity, InventoryHealth, MonitorEvent, OBSERVE_HOLD,
-    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::Compat;
 use tarpc::context::Context;

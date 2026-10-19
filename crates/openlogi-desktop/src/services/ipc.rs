@@ -44,9 +44,9 @@ use openlogi_core::hid::{
     BacklightState, DeviceRoute, EasySwitchHosts, FnLockState, LightCommand, ReportRateInfo,
     WriteError,
 };
-use openlogi_ipc::SavedConfig;
 #[cfg(test)]
 use openlogi_ipc::FlowStatus;
+use openlogi_ipc::SavedConfig;
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure};
 use tarpc::client::RpcError;

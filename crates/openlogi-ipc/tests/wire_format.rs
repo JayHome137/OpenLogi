@@ -490,7 +490,10 @@ fn agent_snapshot() {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e36010000000000000000000000");
+    assert_wire(
+        &observed,
+        "03010001010705302e362e36010000000000000000000000",
+    );
 }
 
 #[test]
