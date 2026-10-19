@@ -117,8 +117,11 @@ impl ClipboardBackend for WindowsClipboard {
         }
     }
 
-    fn write_files(&self, files: &[(String, Vec<u8>)]) -> Result<(), String> {
-        let paths = super::persist_received_files(files)?;
+    fn supports_files(&self) -> bool {
+        true
+    }
+
+    fn write_files(&self, paths: &[std::path::PathBuf]) -> Result<(), String> {
         let mut wide = Vec::new();
         for path in paths {
             wide.extend(path.as_os_str().encode_wide());

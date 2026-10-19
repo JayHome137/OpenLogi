@@ -76,8 +76,11 @@ impl ClipboardBackend for MacClipboard {
         )
     }
 
-    fn write_files(&self, files: &[(String, Vec<u8>)]) -> Result<(), String> {
-        let paths = super::persist_received_files(files)?;
+    fn supports_files(&self) -> bool {
+        true
+    }
+
+    fn write_files(&self, paths: &[std::path::PathBuf]) -> Result<(), String> {
         let values: Vec<Retained<NSString>> = paths
             .iter()
             .map(|path| NSString::from_str(&path.to_string_lossy()))

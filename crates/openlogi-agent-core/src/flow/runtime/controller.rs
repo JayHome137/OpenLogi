@@ -14,7 +14,7 @@ use tracing::warn;
 
 use super::FlowGeneration;
 use crate::flow::FlowDeviceSnapshot;
-use crate::flow::clipboard::{ClipboardManager, default_backend};
+use crate::flow::clipboard::{ClipboardManager, PasteOutcome, default_backend};
 use crate::flow::config::CompiledFlowConfig;
 use crate::flow::handoff::{fetch_remote_clipboard, start_outgoing};
 use crate::observable::ObservableState;
@@ -282,11 +282,17 @@ impl FlowInputHandle {
         let _ = self.movement.try_send(Movement { cursor });
     }
 
-    /// Notify the Flow runtime that the local user invoked paste. The runtime
-    /// then pulls one pending remote clipboard generation, if available.
+    /// Notify the Flow runtime that the local user invoked paste.
+    ///
+    /// A staged remote value is handed to the clipboard worker (the hook
+    /// thread never writes the clipboard itself); otherwise the runtime pulls
+    /// one pending remote clipboard generation, if available.
     pub fn try_paste(&self) {
-        if !self.clipboard.apply_staged() {
-            let _ = self.control.send(Control::Paste);
+        match self.clipboard.request_paste() {
+            PasteOutcome::NothingStaged | PasteOutcome::Failed => {
+                let _ = self.control.send(Control::Paste);
+            }
+            PasteOutcome::Applied | PasteOutcome::Pending => {}
         }
     }
 }
@@ -526,9 +532,7 @@ impl EdgeInput {
             self.refresh(settings, &displays());
             self.refreshed_at = Some(now);
         }
-        self.detector
-            .as_mut()?
-            .update(cursor.position, timestamp)
+        self.detector.as_mut()?.update(cursor.position, timestamp)
     }
 
     fn refresh(&mut self, settings: &EdgeSettings, displays: &[DisplayRect]) {

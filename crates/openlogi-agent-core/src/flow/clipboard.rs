@@ -5,8 +5,9 @@
 //! it so those decisions do not leak into the transport or GUI layers.
 
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{SyncSender, sync_channel};
 use std::sync::{Arc, Mutex as StdMutex};
-use std::time::UNIX_EPOCH;
+use std::time::{Duration, UNIX_EPOCH};
 
 use buffa::Message;
 use openlogi_flow::generated as proto;
@@ -30,6 +31,16 @@ pub(super) const MAX_CLIPBOARD_BYTES: usize = 64 * 1024 * 1024;
 const MAX_FILE_COUNT: usize = 256;
 pub(super) const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 pub(super) const MAX_FILE_LIST_BYTES: usize = 1024 * 1024;
+/// How long the paste shortcut waits for the clipboard worker to install a
+/// staged remote value before the keystroke continues to the application.
+///
+/// The host clipboard write runs on the worker, never on the input-hook
+/// thread; the hook only waits, bounded, so the application usually reads the
+/// new value. Everything slow (fetching, validating and writing received files
+/// to disk) already happened while staging, so the remaining write is a
+/// pasteboard update. If it misses the budget the keystroke is not held any
+/// longer: that paste sees the previous contents and the next one the new.
+const PASTE_APPLY_BUDGET: Duration = Duration::from_millis(40);
 
 /// Host boundary for the system clipboard.
 pub(crate) trait ClipboardBackend: Send + Sync {
@@ -41,19 +52,35 @@ pub(crate) trait ClipboardBackend: Send + Sync {
     fn read_files(&self) -> Option<Vec<PathBuf>> {
         None
     }
-    /// Places downloaded files under the platform download directory and makes
-    /// those paths the current file clipboard contents.
-    fn write_files(&self, _files: &[(String, Vec<u8>)]) -> Result<(), String> {
+    /// Whether [`Self::write_files`] is implemented on this host.
+    fn supports_files(&self) -> bool {
+        false
+    }
+    /// Makes already-persisted received files the current file clipboard
+    /// contents.
+    fn write_files(&self, _paths: &[PathBuf]) -> Result<(), String> {
         Err("file clipboard is unsupported on this host".to_owned())
     }
 }
 
 enum PreparedClipboard {
     Text(Vec<u8>),
+    /// Received files, already written under the Flow received-files directory.
     Files {
-        files: Vec<(String, Vec<u8>)>,
+        paths: Vec<PathBuf>,
         identity_digest: [u8; 32],
     },
+}
+
+impl PreparedClipboard {
+    /// Remove the on-disk copies of a file set that is dropped unpasted.
+    fn discard(self) {
+        if let Self::Files { paths, .. } = self {
+            for path in paths {
+                let _ = std::fs::remove_file(path);
+            }
+        }
+    }
 }
 
 enum ClipboardSuppression {
@@ -77,15 +104,33 @@ impl ClipboardPasteBridge {
     }
 
     fn stage(&self, prepared: PreparedClipboard) {
+        if let Ok(mut current) = self.prepared.lock()
+            && let Some(replaced) = current.replace(prepared)
+        {
+            replaced.discard();
+        }
+    }
+
+    /// Re-stage a value whose host write failed, unless a newer one arrived.
+    fn restore(&self, prepared: PreparedClipboard) {
         if let Ok(mut current) = self.prepared.lock() {
-            *current = Some(prepared);
+            if current.is_none() {
+                *current = Some(prepared);
+            } else {
+                prepared.discard();
+            }
         }
     }
 
     fn clear_prepared(&self) {
-        if let Ok(mut prepared) = self.prepared.lock() {
-            *prepared = None;
+        let cleared = self.prepared.lock().ok().and_then(|mut value| value.take());
+        if let Some(cleared) = cleared {
+            cleared.discard();
         }
+    }
+
+    fn has_prepared(&self) -> bool {
+        self.prepared.lock().is_ok_and(|value| value.is_some())
     }
 
     fn apply(&self) -> bool {
@@ -97,7 +142,7 @@ impl ClipboardPasteBridge {
             PreparedClipboard::Text(bytes) => {
                 let hash = digest(&bytes);
                 if self.backend.write_text(&bytes).is_err() {
-                    self.stage(PreparedClipboard::Text(bytes));
+                    self.restore(PreparedClipboard::Text(bytes));
                     return false;
                 }
                 if let Ok(mut suppression) = self.suppression.lock() {
@@ -105,12 +150,12 @@ impl ClipboardPasteBridge {
                 }
             }
             PreparedClipboard::Files {
-                files,
+                paths,
                 identity_digest,
             } => {
-                if self.backend.write_files(&files).is_err() {
-                    self.stage(PreparedClipboard::Files {
-                        files,
+                if self.backend.write_files(&paths).is_err() {
+                    self.restore(PreparedClipboard::Files {
+                        paths,
                         identity_digest,
                     });
                     return false;
@@ -237,22 +282,85 @@ struct ClipboardState {
 pub(crate) struct ClipboardManager {
     backend: Arc<dyn ClipboardBackend>,
     paste_bridge: Arc<ClipboardPasteBridge>,
+    paste_worker: Option<SyncSender<PasteRequest>>,
     state: Mutex<ClipboardState>,
+}
+
+/// What a paste shortcut found when it asked for the staged remote value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum PasteOutcome {
+    /// No remote value is staged; the runtime may fetch one.
+    NothingStaged,
+    /// The staged value is now on the host clipboard.
+    Applied,
+    /// The host clipboard refused the write; the value stays staged.
+    Failed,
+    /// The worker is still writing; the value lands shortly.
+    Pending,
+}
+
+struct PasteRequest {
+    done: SyncSender<bool>,
+}
+
+/// The one thread that writes staged remote values to the host clipboard, so
+/// the input hook never calls into the clipboard backend itself.
+fn spawn_paste_worker(bridge: Arc<ClipboardPasteBridge>) -> Option<SyncSender<PasteRequest>> {
+    let (requests, received) = sync_channel::<PasteRequest>(1);
+    std::thread::Builder::new()
+        .name("openlogi-flow-paste".to_owned())
+        .spawn(move || {
+            while let Ok(request) = received.recv() {
+                let _ = request.done.send(bridge.apply());
+            }
+        })
+        .map_err(|error| tracing::warn!(%error, "Flow paste worker failed to start"))
+        .ok()?;
+    Some(requests)
 }
 
 impl ClipboardManager {
     pub(crate) fn new(backend: Arc<dyn ClipboardBackend>) -> Self {
+        let paste_bridge = Arc::new(ClipboardPasteBridge::new(Arc::clone(&backend)));
         Self {
-            paste_bridge: Arc::new(ClipboardPasteBridge::new(Arc::clone(&backend))),
+            paste_worker: spawn_paste_worker(Arc::clone(&paste_bridge)),
+            paste_bridge,
             backend,
             state: Mutex::new(ClipboardState::default()),
         }
     }
 
-    /// Applies a prefetched remote clipboard value during the input-hook
-    /// callback, before the host application handles Cmd/Ctrl+V.
+    /// Hands a prefetched remote clipboard value to the paste worker when the
+    /// local user presses Cmd/Ctrl+V. Safe to call from the input-hook
+    /// callback: the hook never touches the clipboard backend, and it waits at
+    /// most [`PASTE_APPLY_BUDGET`] for the worker.
+    pub(crate) fn request_paste(&self) -> PasteOutcome {
+        self.request_paste_within(PASTE_APPLY_BUDGET)
+    }
+
+    fn request_paste_within(&self, budget: Duration) -> PasteOutcome {
+        if !self.paste_bridge.has_prepared() {
+            return PasteOutcome::NothingStaged;
+        }
+        let Some(worker) = self.paste_worker.as_ref() else {
+            return PasteOutcome::Failed;
+        };
+        let (done, result) = sync_channel(1);
+        if worker.try_send(PasteRequest { done }).is_err() {
+            // A previous paste is still being written; it carries the value.
+            return PasteOutcome::Pending;
+        }
+        match result.recv_timeout(budget) {
+            Ok(true) => PasteOutcome::Applied,
+            Ok(false) => PasteOutcome::Failed,
+            Err(_) => PasteOutcome::Pending,
+        }
+    }
+
+    /// Test seam: apply through the worker with a generous budget.
+    #[cfg(test)]
     pub(crate) fn apply_staged(&self) -> bool {
-        self.paste_bridge.apply()
+        self.request_paste_within(Duration::from_secs(5)) == PasteOutcome::Applied
     }
 
     /// Reads the host clipboard and returns a new announcement only when text
@@ -492,7 +600,7 @@ impl ClipboardManager {
 
     /// Validates and stages a fetched remote generation. The hash is checked
     /// against both the announce and the transfer terminator when present;
-    /// the host clipboard is updated only by [`Self::apply_staged`].
+    /// the host clipboard is updated only by [`Self::request_paste`].
     pub(crate) async fn apply_remote(
         &self,
         peer: openlogi_flow::sas::PublicKey,
@@ -612,8 +720,11 @@ impl ClipboardManager {
         Ok(list.files)
     }
 
-    /// Stages a validated remote file set and consumes its announced
-    /// generation. The host clipboard is updated only by [`Self::apply_staged`].
+    /// Writes a validated remote file set to the received-files directory,
+    /// stages it and consumes its announced generation. The disk writes run
+    /// on a blocking worker here, at staging time, so a later paste only has
+    /// to point the host clipboard at the files. The host clipboard is updated
+    /// only by [`Self::request_paste`].
     pub(crate) async fn apply_remote_files(
         &self,
         peer: openlogi_flow::sas::PublicKey,
@@ -621,18 +732,47 @@ impl ClipboardManager {
         files: Vec<(String, Vec<u8>)>,
         identity_digest: [u8; 32],
     ) -> Result<(), ClipboardError> {
+        if !self.backend.supports_files() {
+            return Err(ClipboardError::UnsupportedMime);
+        }
+        self.check_remote_files(peer, sequence).await?;
+        let paths = tokio::task::spawn_blocking(move || persist_received_files(&files))
+            .await
+            .map_err(|error| ClipboardError::Backend(error.to_string()))?
+            .map_err(ClipboardError::Backend)?;
         let mut state = self.state.lock().await;
-        let Some(remote) = state.remote.get_mut(&peer) else {
+        let current = state.remote.get_mut(&peer).filter(|remote| {
+            remote.sequence == sequence && remote.mime == FILES_MIME && !remote.consumed
+        });
+        let Some(remote) = current else {
+            // Superseded while the files were being written.
+            PreparedClipboard::Files {
+                paths,
+                identity_digest,
+            }
+            .discard();
+            return Err(ClipboardError::StaleSequence);
+        };
+        remote.consumed = true;
+        self.paste_bridge.stage(PreparedClipboard::Files {
+            paths,
+            identity_digest,
+        });
+        Ok(())
+    }
+
+    async fn check_remote_files(
+        &self,
+        peer: openlogi_flow::sas::PublicKey,
+        sequence: u64,
+    ) -> Result<(), ClipboardError> {
+        let state = self.state.lock().await;
+        let Some(remote) = state.remote.get(&peer) else {
             return Err(ClipboardError::StaleSequence);
         };
         if remote.sequence != sequence || remote.mime != FILES_MIME || remote.consumed {
             return Err(ClipboardError::StaleSequence);
         }
-        self.paste_bridge.stage(PreparedClipboard::Files {
-            files,
-            identity_digest,
-        });
-        remote.consumed = true;
         Ok(())
     }
 }
@@ -757,7 +897,6 @@ fn collect_files(paths: Vec<PathBuf>) -> Option<LocalFileSet> {
     })
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn persist_received_files(files: &[(String, Vec<u8>)]) -> Result<Vec<PathBuf>, String> {
     validate_file_payloads(files)?;
     let root = openlogi_core::paths::data_dir()
@@ -853,7 +992,6 @@ fn validate_file_entries(entries: &[proto::FileEntry]) -> Result<(), ClipboardEr
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn validate_file_payloads(files: &[(String, Vec<u8>)]) -> Result<(), String> {
     if files.is_empty() || files.len() > MAX_FILE_COUNT {
         return Err("file list has an invalid number of files".to_owned());
@@ -1258,6 +1396,82 @@ mod tests {
         assert_eq!(manager.pending_fetch().await, None);
         assert!(!manager.apply_staged());
         assert_eq!(backend.read_text(), Some(b"local".to_vec()));
+    }
+
+    /// Records which thread writes and can be made slow.
+    #[derive(Default)]
+    struct ThreadRecordingClipboard {
+        delay: Duration,
+        writer: StdMutex<Option<std::thread::ThreadId>>,
+        value: StdMutex<Option<Vec<u8>>>,
+    }
+
+    impl ClipboardBackend for ThreadRecordingClipboard {
+        fn read_text(&self) -> Option<Vec<u8>> {
+            self.value.lock().ok().and_then(|value| value.clone())
+        }
+
+        fn write_text(&self, bytes: &[u8]) -> Result<(), String> {
+            std::thread::sleep(self.delay);
+            *self.writer.lock().map_err(|_| "poisoned".to_owned())? =
+                Some(std::thread::current().id());
+            *self.value.lock().map_err(|_| "poisoned".to_owned())? = Some(bytes.to_vec());
+            Ok(())
+        }
+    }
+
+    async fn stage_remote_text(manager: &ClipboardManager, text: &[u8]) {
+        let peer = openlogi_flow::sas::PublicKey::new([21; 32]);
+        let announce = proto::ClipboardAnnounce {
+            sequence: 1,
+            formats: vec![proto::ClipboardFormat {
+                mime: TEXT_MIME.to_owned(),
+                size_bytes: text.len() as u64,
+                sha256: Some(digest(text).to_vec()),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert!(manager.accept_announce(peer, &announce).await.is_some());
+        manager
+            .apply_remote(peer, 1, 0, text.to_vec(), Some(digest(text)))
+            .await
+            .expect("staged");
+    }
+
+    #[tokio::test]
+    async fn paste_writes_the_clipboard_on_the_worker_not_the_caller() {
+        let backend = Arc::new(ThreadRecordingClipboard::default());
+        let manager = ClipboardManager::new(Arc::clone(&backend) as Arc<dyn ClipboardBackend>);
+        assert_eq!(manager.request_paste(), PasteOutcome::NothingStaged);
+        stage_remote_text(&manager, b"remote").await;
+
+        assert!(manager.apply_staged());
+        assert_eq!(backend.read_text(), Some(b"remote".to_vec()));
+        let writer = backend.writer.lock().unwrap().expect("written");
+        assert_ne!(writer, std::thread::current().id());
+    }
+
+    #[tokio::test]
+    async fn a_slow_clipboard_write_does_not_hold_the_paste_caller() {
+        let backend = Arc::new(ThreadRecordingClipboard {
+            delay: Duration::from_millis(400),
+            ..Default::default()
+        });
+        let manager = ClipboardManager::new(Arc::clone(&backend) as Arc<dyn ClipboardBackend>);
+        stage_remote_text(&manager, b"late").await;
+
+        let started = std::time::Instant::now();
+        assert_eq!(manager.request_paste(), PasteOutcome::Pending);
+        assert!(started.elapsed() < Duration::from_millis(300));
+        // The worker still finishes the write for the next paste.
+        for _ in 0..50 {
+            if backend.read_text().is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(backend.read_text(), Some(b"late".to_vec()));
     }
 
     #[test]
