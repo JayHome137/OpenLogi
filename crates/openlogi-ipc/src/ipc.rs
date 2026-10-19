@@ -14,17 +14,20 @@ use std::time::Duration;
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
-use openlogi_core::config::Lighting;
-use openlogi_core::device::{DeviceInventory, StandaloneDevice};
+use openlogi_core::config::{ConfigRevision, Lighting};
+use openlogi_core::device::{ChangedOnLight, DeviceInventory, LightState, StandaloneDevice};
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, Dpi, DpiInfo, FnLockState, LightCommand, PairingError,
-    PasskeyMethod, ReceiverSelector, ScrollWheelMode, SmartShiftStatus, WriteError,
+    BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
+    LightCommand, PairingError, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use serde::{Deserialize, Serialize};
 pub use succession::Identity;
 
-/// Wire-protocol version. Bumped only on a breaking change to the types below —
-/// independent of the crate version. The GUI checks it via
+/// Wire-protocol version. Bumped on a breaking change to the types below, at
+/// most once per release: a change made while this is already above the latest
+/// release's value joins that unreleased version (`crates/openlogi-ipc/AGENTS.md`).
+/// Independent of the crate version. The GUI checks it via
 /// [`Agent::protocol_version`] on connect and refuses to drive a mismatch
 /// (transient only: both binaries ship in one `.app` and update atomically).
 ///
@@ -67,10 +70,54 @@ pub use succession::Identity;
 ///      `HidppOperation::ReadFnLock` appended.
 /// v33: `Agent::unpair_device` appended.
 /// v34: `KeyCombo` gains the Super modifier bit (`Super`, `Win`, `Meta`).
-/// v35: `AgentSnapshot::flow` appended — configured Flow peers and their
-///      coarse connection state.
-/// v36: Flow pairing state and management RPCs appended.
-pub const PROTOCOL_VERSION: u32 = 36;
+/// v35: `HidppOperation::{ReadPointerScaling, WritePointerScaling}` appended.
+/// v36: `Action::TapKeyHoldingModifiers` appended for switcher-style output
+///      that holds the modifiers and taps the ordinary key once;
+///      `WriteError::{DpiUnsupported, DpiNotApplied}` appended — `set_dpi`
+///      rejects unsupported values and reports a write the device kept;
+///      `BatteryInfo::percentage` became `Option<u8>` — `None` when the
+///      device reports only a level (a `0x1004` without the state-of-charge
+///      capability) or has no reading yet; `PairedDevice::settings_revision`
+///      appended — it moves when the device reports a setting changed on it;
+///      `FnLockState::default_fn_lock` became `Option<bool>` — `None` for a
+///      `0x40a0` keyboard, which reports no default;
+///      `WriteError::HapticWaveformUnsupported` appended — a haptic play of a
+///      waveform the device does not advertise is refused before it is sent;
+///      `Capabilities::os_layout` and `HidppOperation::WriteOsLayout`
+///      appended — a `0x4531` keyboard whose platform software can set is kept
+///      on the host OS's key layout; `Agent::{read_report_rate,
+///      set_report_rate}`, `Capabilities::report_rate`,
+///      `HidppOperation::{ReadReportRate, WriteReportRate}` and
+///      `WriteError::{ReportRateUnsupported, ReportRateNotApplied}` appended —
+///      the `0x8061`/`0x8060` report rate in hertz; `BacklightState::{power_save,
+///      controls}` and `WriteError::{BacklightChangeUnsupported,
+///      BacklightNotApplied}` appended — `0x1982` battery saving and the
+///      backlight changes a keyboard offers; `Agent::set_backlight` and
+///      `Capabilities::backlight` appended — the keyboard backlight set from
+///      the settings app; `WriteError::HapticsUnavailable` appended — a
+///      haptic play is refused before it is sent while the device reports a
+///      non-zero `0x19b0` haptic status; `Agent::{read_easy_switch_hosts,
+///      rename_easy_switch_host}`, `Capabilities::easy_switch`,
+///      `HidppOperation::{ReadHosts, RenameHost}` and
+///      `WriteError::{HostRenameUnsupported, HostSlotEmpty, HostNameRejected,
+///      HostNameNotApplied}` appended — the `0x1815` Easy-Switch host names
+///      and OS, and renaming a slot's computer.
+/// v37: `Capabilities::virtual_thumbwheel` appended — Back/Forward can hold
+///      the main wheel as a virtual thumb wheel; `AgentSnapshot::lights`
+///      appended — what each standalone light reached over HID++ `0x1990`
+///      reads back, and the settings changed on the light itself;
+///      `Agent::reload_saved_config` appended — the reload after a save of
+///      the settings app, with the revision of the file it wrote. It keeps a
+///      change made on a light unless the save holds its value, removes the
+///      control's value, or the user chose that control. A file at another
+///      revision loads as a plain reload. `Agent::observe_backlight`
+///      appended — the level a keyboard's backlight keys set, for the
+///      overlay's transient indicator.
+/// v38: `AgentSnapshot::flow` appended — configured Flow peers, their
+///      coarse connection state, and the Flow pairing ceremony; Flow
+///      management RPCs (`flow_set_enabled`, `flow_pair_*`,
+///      `flow_set_layout`) appended.
+pub const PROTOCOL_VERSION: u32 = 38;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -147,6 +194,10 @@ pub struct AgentSnapshot {
     /// Which application per-app profiles are resolving against. See
     /// [`ForegroundApps`].
     pub foreground: ForegroundApps,
+    /// The online standalone lights the agent reads over HID++ `0x1990`. A
+    /// light reached only through its raw report reads nothing back and is
+    /// not listed.
+    pub lights: Vec<ObservedLight>,
     /// Cross-machine Flow availability and coarse peer connection state.
     pub flow: FlowStatus,
 }
@@ -280,16 +331,53 @@ pub enum FlowCommandError {
     Unavailable,
 }
 
+/// A standalone light as it reported itself to the agent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObservedLight {
+    /// The route the light is reached on, as in [`AgentSnapshot::standalone`].
+    pub route: DeviceRoute,
+    /// What the light last read back: when its watch began, after each of
+    /// its notifications, and after each write OpenLogi made.
+    pub state: LightState,
+    /// Settings changed on the light itself that the saved settings do not
+    /// hold yet. The agent already uses them; the GUI saves them.
+    pub changed_on_light: ChangedOnLight,
+}
+
+/// The controls of a standalone light that the user set in the GUI without
+/// a write to the light, as [`Agent::reload_saved_config`] tells the agent.
+/// A change made on the light to one of them gives way to the saved value.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChosenLight {
+    /// The config key of the light, as `[lights.<key>]` in `config.toml`.
+    /// It names the light whether it is online or not.
+    pub device: String,
+    /// The user set the power.
+    pub power: bool,
+    /// The user set the brightness.
+    pub brightness: bool,
+    /// The user set the colour temperature.
+    pub temperature: bool,
+}
+
+/// A save of the GUI, which [`Agent::reload_saved_config`] reloads.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SavedConfig {
+    /// The revision of `config.toml` that the GUI wrote. A file at another
+    /// revision was edited after the save, so the agent loads it as
+    /// [`Agent::reload_config`] does.
+    pub revision: ConfigRevision,
+    /// The controls of lights the user set in the save without a write.
+    pub chosen: Vec<ChosenLight>,
+}
+
 /// The application the agent currently resolves per-app profiles against, and
 /// the ones it recently saw in front.
 ///
-/// `recent` is here because a client cannot produce these identifiers itself.
-/// They come from four incompatible namespaces — macOS bundle ids, X11
-/// `WM_CLASS`, Wayland `app_id`, Windows executable paths — and only the agent
-/// holds the one that its matcher will actually compare. Enumerating installed
-/// applications in the GUI would produce plausible strings that miss. A client
-/// offering "make a profile for…" therefore picks from this list rather than
-/// from the host.
+/// `recent` carries identifiers defined by [`ForegroundApp::id`] that the agent
+/// observed in front. These are the exact keys the matcher compares, so a client
+/// can create a profile without guessing an installed application's runtime
+/// identifier.
 ///
 /// It also answers the case [`Self::current`] cannot: while a client's own
 /// window is in front, *it* is the foreground application, so the app the user
@@ -548,6 +636,19 @@ pub struct RingObservation {
     pub invocation: Option<ActionRingInvocation>,
 }
 
+/// A transient keyboard backlight level indicator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BacklightObservation {
+    /// Generation of this observation on the backlight channel.
+    pub generation: Generation,
+    /// Current level, where zero is off.
+    pub current_level: u8,
+    /// Number of levels reported by the keyboard, including level zero.
+    pub levels: u8,
+    /// Whether the firmware reports a visible backlight state.
+    pub visible: bool,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -594,7 +695,9 @@ pub trait Agent {
     /// window is open).
     async fn inventory() -> Vec<DeviceInventory>;
     /// Re-read `config.toml` and rebuild the live binding/DPI maps. Called by
-    /// the GUI after it saves a config change.
+    /// the GUI at startup and by the CLI after it edits the file: a saved
+    /// light value that differs from the one the agent had replaces a change
+    /// made on the light, as a hand edit does.
     async fn reload_config() -> Result<(), ConfigReloadError>;
     /// Apply a DPI value to `route` now (slider preview / commit).
     async fn set_dpi(route: DeviceRoute, dpi: Dpi) -> Result<(), WriteError>;
@@ -717,6 +820,59 @@ pub trait Agent {
     /// receiver, and with [`PairingFailure::ReceiverNotFound`] for a route
     /// that names no receiver slot or a receiver that is not connected.
     async fn unpair_device(route: DeviceRoute) -> Result<(), PairingFailure>;
+    /// Read the report rate of the mouse on `route` and every rate it lists
+    /// for its current connection.
+    async fn read_report_rate(route: DeviceRoute) -> Result<ReportRateInfo, WriteError>;
+    /// Write the report rate of the mouse on `route` now and answer with what
+    /// it reads back. A rate the mouse does not list is refused with
+    /// [`WriteError::ReportRateUnsupported`] before anything is written; one
+    /// it acknowledges but does not keep — an onboard profile owns the rate —
+    /// with [`WriteError::ReportRateNotApplied`].
+    async fn set_report_rate(
+        route: DeviceRoute,
+        rate: ReportRate,
+    ) -> Result<ReportRateInfo, WriteError>;
+    /// Apply one backlight change to the keyboard on `route` and answer with
+    /// the backlight it reads back. A change the keyboard does not offer is
+    /// refused with [`WriteError::BacklightChangeUnsupported`] before anything
+    /// is written; one it acknowledges but does not keep with
+    /// [`WriteError::BacklightNotApplied`]. The keyboard stores the result
+    /// itself, so nothing is persisted or replayed.
+    async fn set_backlight(
+        route: DeviceRoute,
+        change: BacklightChange,
+    ) -> Result<BacklightState, WriteError>;
+
+    /// Read the Easy-Switch host slots of the device on `route`: which are
+    /// paired, how each reaches its computer, and the name and OS that
+    /// computer recorded (`0x1815 HostsInfo`).
+    async fn read_easy_switch_hosts(route: DeviceRoute) -> Result<EasySwitchHosts, WriteError>;
+
+    /// Name the computer on Easy-Switch `slot` (zero-based) of the device on
+    /// `route` and answer with the slots it reads back. A device that cannot
+    /// rename, an empty slot and a name that does not fit are refused with
+    /// [`WriteError::HostRenameUnsupported`], [`WriteError::HostSlotEmpty`]
+    /// and [`WriteError::HostNameRejected`] before anything is written; a
+    /// name the device acknowledges but does not keep with
+    /// [`WriteError::HostNameNotApplied`]. The device stores the name itself,
+    /// so nothing is persisted or replayed.
+    async fn rename_easy_switch_host(
+        route: DeviceRoute,
+        slot: u8,
+        name: String,
+    ) -> Result<EasySwitchHosts, WriteError>;
+    /// Re-read `config.toml` after the GUI saved it, as
+    /// [`Agent::reload_config`] does, except for changes made on lights. The
+    /// GUI writes a light it changes, and that write already takes the change
+    /// on the light. So this reload keeps such a change unless the save holds
+    /// its value, the save removes the control's value, or `saved.chosen`
+    /// names the control: the user set it while the light could not be
+    /// written. This holds only for the file the GUI wrote: a file at another
+    /// revision than `saved.revision` was edited since, and loads as
+    /// [`Agent::reload_config`] loads it.
+    async fn reload_saved_config(saved: SavedConfig) -> Result<(), ConfigReloadError>;
+    /// Block until the transient keyboard-backlight indicator changes.
+    async fn observe_backlight(since: Generation) -> BacklightObservation;
     /// Enable or disable the Flow runtime and persist the setting.
     async fn flow_set_enabled(enabled: bool) -> Result<(), ConfigReloadError>;
     /// Start a Flow peer pairing ceremony against a hostname or IP address.

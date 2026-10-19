@@ -119,9 +119,11 @@ impl FlowGeneration {
         let identity = tokio::task::spawn_blocking(load_machine_identity)
             .await
             .map_err(|error| FlowRuntimeError::IdentityTask(error.to_string()))??;
-        let mut capabilities = vec![EnumValue::from(proto::Capability::ClipboardText as i32)];
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        capabilities.push(EnumValue::from(proto::Capability::ClipboardFiles as i32));
+        let capabilities = vec![
+            EnumValue::from(proto::Capability::ClipboardText as i32),
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
+            EnumValue::from(proto::Capability::ClipboardFiles as i32),
+        ];
         let hello = proto::Hello {
             proto_min: PROTOCOL_MIN,
             proto_max: PROTOCOL_MAX,

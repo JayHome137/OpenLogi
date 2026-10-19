@@ -46,6 +46,6 @@ workspace = true
 [dev-dependencies]
 # Only to advance virtual time in the DeviceOp/timed timeout test without a
 # real multi-second sleep.
-openlogi-fixture = { workspace = true }
+openlogi-fixture = { workspace = true, features = ["fs"] }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }

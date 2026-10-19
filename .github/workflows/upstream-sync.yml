@@ -1,0 +1,113 @@
+name: Sync upstream code
+
+# Keeps this fork's master an exact mirror of AprilNEA/OpenLogi master plus
+# one fork-only commit: the commit that adds this file. Each run rebuilds
+# master as upstream/master + that commit and force-pushes it with a lease,
+# so master never accumulates merge commits or divergent code.
+#
+# Pushing is allowed with the built-in token as long as the push does not
+# change any file under .github/workflows. When upstream does change its
+# workflows, GitHub rejects GITHUB_TOKEN pushes ("workflows" permission), so
+# the optional UPSTREAM_SYNC_TOKEN secret (a PAT with Contents: write and
+# Workflows: write on this repository) is tried first when it is configured.
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 3 * * *"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Mirror upstream master
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out master
+        uses: actions/checkout@v7
+        with:
+          ref: master
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Rebuild master on upstream master
+        id: rebuild
+        env:
+          SYNC_FILE: .github/workflows/upstream-sync.yml
+        run: |
+          set -euo pipefail
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags https://github.com/AprilNEA/OpenLogi.git \
+            +refs/heads/master:refs/remotes/upstream/master
+          old="$(git rev-parse HEAD)"
+          upstream="$(git rev-parse upstream/master)"
+          echo "old=$old" >> "$GITHUB_OUTPUT"
+
+          # Everything on master that upstream does not have must be exactly
+          # the one commit that only touches this workflow file.
+          mapfile -t own < <(git rev-list "$upstream..$old")
+          if [ "${#own[@]}" -ne 1 ]; then
+            {
+              echo "## Sync stopped"
+              echo "master has ${#own[@]} commits that are not on upstream master; expected exactly 1 (the sync workflow commit)."
+              echo "Inspect master manually; nothing was pushed."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          files="$(git diff-tree --no-commit-id --name-only -r "${own[0]}")"
+          if [ "$files" != "$SYNC_FILE" ]; then
+            {
+              echo "## Sync stopped"
+              echo "The fork-only commit ${own[0]} touches files other than $SYNC_FILE:"
+              echo '```text'
+              echo "$files"
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+
+          if [ "$(git rev-parse "$old^")" = "$upstream" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "master is already upstream master ($upstream) + the sync workflow commit." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          git reset --hard "$upstream"
+          git cherry-pick "${own[0]}"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "upstream=$upstream" >> "$GITHUB_OUTPUT"
+
+      - name: Force-push master with lease
+        if: steps.rebuild.outputs.changed == 'true'
+        env:
+          OLD: ${{ steps.rebuild.outputs.old }}
+          UPSTREAM: ${{ steps.rebuild.outputs.upstream }}
+          SYNC_TOKEN: ${{ secrets.UPSTREAM_SYNC_TOKEN }}
+          BUILTIN_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          push() {
+            git push --force-with-lease="refs/heads/master:$OLD" \
+              "https://x-access-token:$1@github.com/$GITHUB_REPOSITORY.git" \
+              HEAD:refs/heads/master
+          }
+          if [ -n "${SYNC_TOKEN:-}" ] && push "$SYNC_TOKEN"; then
+            via="UPSTREAM_SYNC_TOKEN"
+          elif push "$BUILTIN_TOKEN"; then
+            via="GITHUB_TOKEN"
+          else
+            {
+              echo "## Push rejected"
+              echo "If upstream changed files under .github/workflows, GITHUB_TOKEN cannot push them."
+              echo "Configure the UPSTREAM_SYNC_TOKEN secret with a PAT that has Contents: write and Workflows: write."
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "master is now upstream master ($UPSTREAM) + the sync workflow commit (pushed via $via; previous tip $OLD)." >> "$GITHUB_STEP_SUMMARY"
