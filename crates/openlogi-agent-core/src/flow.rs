@@ -68,6 +68,18 @@ fn is_pointing_device(kind: DeviceKind) -> bool {
     )
 }
 
+/// Whether a peer's identity names a pointing device.
+fn is_pointing_category(identity: &proto::DeviceIdentity) -> bool {
+    matches!(
+        identity.category.as_known(),
+        Some(
+            proto::DeviceCategory::Mouse
+                | proto::DeviceCategory::Trackball
+                | proto::DeviceCategory::Touchpad
+        )
+    )
+}
+
 #[derive(Clone, Debug)]
 struct RuntimeDevice {
     snapshot: FlowDeviceSnapshot,

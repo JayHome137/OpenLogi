@@ -8,6 +8,7 @@ use std::time::{Duration, Instant};
 
 use buffa::EnumValue;
 use openlogi_core::config::{Config, ConfigError, ConfigFile, FlowPeer};
+use openlogi_core::device::DeviceKind;
 use openlogi_flow::discovery::{
     CandidateSource, ManualCandidateSource, MdnsAdvertiser, MdnsCandidateSource, MdnsRecord,
     collect_candidates,
@@ -605,7 +606,36 @@ pub(super) struct GenerationState {
     pub(super) clipboard: Arc<ClipboardManager>,
     pairing_phase: RwLock<Option<openlogi_ipc::FlowPairingPhase>>,
     /// Where Flow itself last moved each device, by config key, and when.
-    presence: std::sync::Mutex<HashMap<String, (Presence, std::time::Instant)>>,
+    presence: std::sync::Mutex<HashMap<String, PresenceMark>>,
+    /// The last inventory view of each configured device, by config key, so a
+    /// device that is gone from this machine's inventory (a Bluetooth device
+    /// connected to another host) keeps its kind and every identifier.
+    last_seen: std::sync::Mutex<HashMap<String, FlowDeviceSnapshot>>,
+}
+
+/// One [`Presence`] record: what Flow did, when, and for how long the record
+/// outranks a disagreeing inventory.
+#[derive(Clone, Copy, Debug)]
+struct PresenceMark {
+    presence: Presence,
+    at: std::time::Instant,
+    ttl: std::time::Duration,
+}
+
+impl PresenceMark {
+    fn is_live(&self, now: std::time::Instant) -> bool {
+        now.saturating_duration_since(self.at) < self.ttl
+    }
+
+    /// Whether the inventory's view of the device now says the same thing.
+    /// A device the inventory does not list at all is not here, which agrees
+    /// with a departure: a Bluetooth device leaves no node behind.
+    fn agrees_with(&self, snapshot: Option<&FlowDeviceSnapshot>) -> bool {
+        match self.presence {
+            Presence::Arrived => snapshot.is_some_and(|snapshot| snapshot.online),
+            Presence::Departed => snapshot.is_none_or(|snapshot| !snapshot.online),
+        }
+    }
 }
 
 /// What Flow knows first-hand about a device's whereabouts.
@@ -624,8 +654,19 @@ pub(super) enum Presence {
     Departed,
 }
 
-/// How long Flow's own record outranks the inventory.
-const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(20);
+/// How long Flow's own record outranks the inventory. Longer than the
+/// receiver's arrival deadline, so an accepted arrival is not dropped while
+/// the receiver is still allowed to wait for it.
+const PRESENCE_TTL: std::time::Duration = std::time::Duration::from_secs(45);
+const _: () = assert!(PRESENCE_TTL.as_millis() > super::handoff::ARM_TIMEOUT.as_millis());
+
+/// How long a departure of a directly attached (Bluetooth or cabled) device
+/// outranks an inventory that still lists it online. Should the OS keep the
+/// node of a Bluetooth device that went to another host, the inventory replays
+/// the device's last good probe for a few failed passes before it gives up;
+/// meanwhile this machine must not announce the device or refuse it back as
+/// "already online".
+const DIRECT_DEPARTED_TTL: std::time::Duration = std::time::Duration::from_secs(90);
 
 /// Longest wait between attempts to reach a lost peer. A peer is a machine on
 /// the same desk: after it restarts or wakes, the link should be back within
@@ -646,7 +687,7 @@ pub(super) struct OutgoingDevice {
     pub(super) key: String,
     /// A mouse or other pointing device; anything else may carry held keys.
     pub(super) pointing: bool,
-    route: DeviceRoute,
+    pub(super) route: DeviceRoute,
     host: u8,
     pub(super) identity: proto::DeviceIdentity,
 }
@@ -660,7 +701,8 @@ impl GenerationState {
         receiver_access: ReceiverAccess,
         clipboard: Arc<ClipboardManager>,
     ) -> Self {
-        let devices = runtime_devices(&config, snapshots);
+        let last_seen = remember_configured(&config, &HashMap::new(), snapshots);
+        let devices = runtime_devices(&config, snapshots, &last_seen);
         Self {
             layout: RwLock::new(config.layout.clone()),
             config,
@@ -681,6 +723,7 @@ impl GenerationState {
             clipboard,
             pairing_phase: RwLock::new(None),
             presence: std::sync::Mutex::new(HashMap::new()),
+            last_seen: std::sync::Mutex::new(last_seen),
         }
     }
 
@@ -691,10 +734,19 @@ impl GenerationState {
         keys: impl IntoIterator<Item = &'a str>,
         presence: Presence,
     ) {
+        self.note_presence_for(keys.into_iter().map(|key| (key, PRESENCE_TTL)), presence);
+    }
+
+    /// [`Self::note_presence`] with a lifetime per device.
+    fn note_presence_for<'a>(
+        &self,
+        keys: impl IntoIterator<Item = (&'a str, std::time::Duration)>,
+        presence: Presence,
+    ) {
         if let Ok(mut record) = self.presence.lock() {
-            let now = std::time::Instant::now();
-            for key in keys {
-                record.insert(key.to_owned(), (presence, now));
+            let at = std::time::Instant::now();
+            for (key, ttl) in keys {
+                record.insert(key.to_owned(), PresenceMark { presence, at, ttl });
             }
         }
         self.device_revision.fetch_add(1, Ordering::Relaxed);
@@ -711,7 +763,7 @@ impl GenerationState {
             for key in keys {
                 if record
                     .get(key)
-                    .is_some_and(|(presence, _)| *presence == Presence::Arrived)
+                    .is_some_and(|mark| mark.presence == Presence::Arrived)
                 {
                     record.remove(key);
                 }
@@ -721,14 +773,14 @@ impl GenerationState {
         self.peer_revision.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Whether Flow's latest move of every one of `keys` was sending it away.
+    /// Whether none of `keys` is on this machine now, by the inventory as
+    /// corrected by Flow's own record.
     pub(super) fn all_departed(&self, keys: &[String]) -> bool {
-        self.presence.lock().is_ok_and(|record| {
-            keys.iter().all(|key| {
-                record
-                    .get(key)
-                    .is_some_and(|(presence, _)| *presence == Presence::Departed)
-            })
+        let devices = self.effective_devices();
+        keys.iter().all(|key| {
+            !devices
+                .iter()
+                .any(|device| device.snapshot.config_key == *key && device.snapshot.online)
         })
     }
 
@@ -772,15 +824,23 @@ impl GenerationState {
         // done its job; dropping it lets a later change Flow did not make (an
         // Easy-Switch button press, say) show at once instead of after the TTL.
         if let Ok(mut record) = self.presence.lock() {
-            record.retain(|key, (presence, _)| {
-                snapshots
-                    .iter()
-                    .find(|snapshot| &snapshot.config_key == key)
-                    .is_none_or(|snapshot| snapshot.online != (*presence == Presence::Arrived))
+            record.retain(|key, mark| {
+                !mark.agrees_with(
+                    snapshots
+                        .iter()
+                        .find(|snapshot| &snapshot.config_key == key),
+                )
             });
         }
+        let last_seen = self.last_seen.lock().map_or_else(
+            |_| remember_configured(&self.config, &HashMap::new(), snapshots),
+            |mut last_seen| {
+                *last_seen = remember_configured(&self.config, &last_seen, snapshots);
+                last_seen.clone()
+            },
+        );
         if let Ok(mut devices) = self.devices.write() {
-            *devices = runtime_devices(&self.config, snapshots);
+            *devices = runtime_devices(&self.config, snapshots, &last_seen);
             self.device_revision.fetch_add(1, Ordering::Relaxed);
             self.peer_revision.fetch_add(1, Ordering::Relaxed);
         }
@@ -1016,8 +1076,10 @@ impl GenerationState {
             .map(|device| (device.route.clone(), device.host))
             .collect();
         openlogi_hid::switch_hosts(&targets, &self.channel_pool).await?;
-        self.note_presence(
-            devices.iter().map(|device| device.key.as_str()),
+        self.note_presence_for(
+            devices
+                .iter()
+                .map(|device| (device.key.as_str(), departed_ttl(&device.route))),
             Presence::Departed,
         );
         Ok(true)
@@ -1177,7 +1239,7 @@ impl TrustedStateProvider for GenerationState {
 /// younger than [`PRESENCE_TTL`] at `now`.
 fn apply_presence(
     devices: Vec<RuntimeDevice>,
-    record: &HashMap<String, (Presence, std::time::Instant)>,
+    record: &HashMap<String, PresenceMark>,
     now: std::time::Instant,
 ) -> Vec<RuntimeDevice> {
     devices
@@ -1185,8 +1247,8 @@ fn apply_presence(
         .map(|mut device| {
             let recent = record
                 .get(&device.snapshot.config_key)
-                .filter(|(_, at)| now.saturating_duration_since(*at) < PRESENCE_TTL)
-                .map(|(presence, _)| *presence);
+                .filter(|mark| mark.is_live(now))
+                .map(|mark| mark.presence);
             match recent {
                 Some(Presence::Arrived) => device.snapshot.online = true,
                 Some(Presence::Departed) => device.snapshot.online = false,
@@ -1197,11 +1259,47 @@ fn apply_presence(
         .collect()
 }
 
+/// How long a departure outranks an inventory that still lists the device.
+fn departed_ttl(route: &DeviceRoute) -> std::time::Duration {
+    match route {
+        DeviceRoute::Direct { .. } => DIRECT_DEPARTED_TTL,
+        _ => PRESENCE_TTL,
+    }
+}
+
+/// `previous` updated with the configured devices the inventory lists now.
+fn remember_configured(
+    config: &CompiledFlowConfig,
+    previous: &HashMap<String, FlowDeviceSnapshot>,
+    snapshots: &[FlowDeviceSnapshot],
+) -> HashMap<String, FlowDeviceSnapshot> {
+    let mut remembered: HashMap<_, _> = previous
+        .iter()
+        .filter(|(key, _)| config.devices.contains_key(*key))
+        .map(|(key, snapshot)| (key.clone(), snapshot.clone()))
+        .collect();
+    for snapshot in snapshots {
+        if config.devices.contains_key(&snapshot.config_key) {
+            remembered.insert(snapshot.config_key.clone(), snapshot.clone());
+        }
+    }
+    remembered
+}
+
+/// The Flow devices of this generation: every configured device the inventory
+/// lists, plus an offline entry for each configured device it does not list.
+///
+/// A device on a receiver stays listed while it is away (offline), but a
+/// Bluetooth device connected to another host leaves no node here at all.
+/// Without its entry a peer's handoff of that device is refused as unknown,
+/// so it is rebuilt from its last inventory view, or failing that from the
+/// identity its `serial:` or `unit:` config key names.
 fn runtime_devices(
     config: &CompiledFlowConfig,
     snapshots: &[FlowDeviceSnapshot],
+    last_seen: &HashMap<String, FlowDeviceSnapshot>,
 ) -> Vec<RuntimeDevice> {
-    snapshots
+    let mut devices: Vec<RuntimeDevice> = snapshots
         .iter()
         .filter_map(|snapshot| {
             let channels = config.devices.get(&snapshot.config_key)?.clone();
@@ -1212,7 +1310,77 @@ fn runtime_devices(
                 channels,
             })
         })
-        .collect()
+        .collect();
+    let listed: Vec<_> = snapshots
+        .iter()
+        .map(FlowDeviceSnapshot::identity)
+        .filter(|identity| !identity.ids.is_empty())
+        .collect();
+    for (key, channels) in &config.devices {
+        if devices
+            .iter()
+            .any(|device| device.snapshot.config_key == *key)
+        {
+            continue;
+        }
+        let Some(snapshot) = last_seen.get(key).cloned().or_else(|| absent_snapshot(key)) else {
+            continue;
+        };
+        let snapshot = FlowDeviceSnapshot {
+            route: None,
+            online: false,
+            ..snapshot
+        };
+        let identity = snapshot.identity();
+        // Listed under another key (a route key it still has settings under):
+        // that entry, not a stand-in, is the device.
+        if identity.ids.is_empty()
+            || listed
+                .iter()
+                .any(|other| same_device(other, &identity).unwrap_or(false))
+        {
+            continue;
+        }
+        devices.push(RuntimeDevice {
+            snapshot,
+            identity,
+            channels: channels.clone(),
+        });
+    }
+    devices
+}
+
+/// An offline snapshot of the device a physical config key names: `serial:…`
+/// or `unit:…`, bare or after a `direct:<vid>:<pid>:` route prefix. Its kind
+/// is unknown until the device is seen.
+fn absent_snapshot(key: &str) -> Option<FlowDeviceSnapshot> {
+    let fragment = key
+        .strip_prefix("direct:")
+        .and_then(|rest| rest.splitn(3, ':').nth(2))
+        .unwrap_or(key);
+    let (serial, unit_id) = if let Some(serial) = fragment.strip_prefix("serial:") {
+        if serial.is_empty() {
+            return None;
+        }
+        (Some(serial.to_owned()), [0; 4])
+    } else {
+        let unit = fragment.strip_prefix("unit:")?;
+        if unit.len() != 8 {
+            return None;
+        }
+        let unit = u32::from_str_radix(unit, 16)
+            .ok()
+            .filter(|unit| *unit != 0)?;
+        (None, unit.to_be_bytes())
+    };
+    Some(FlowDeviceSnapshot {
+        config_key: key.to_owned(),
+        route: None,
+        serial,
+        unit_id,
+        kind: DeviceKind::Unknown,
+        online: false,
+    })
 }
 
 async fn watch_link_state(state: Arc<GenerationState>, handle: PeerSessionHandle) {
@@ -2596,12 +2764,14 @@ mod tests {
             test_device("keyboard", 0xb35c, DeviceKind::Keyboard, "partial-keyboard"),
         ];
         let channels = ["partial-mouse", "partial-keyboard"];
-        let mut pair = TestFlowPair::new_devices(
+        let mut pair = TestFlowPair::new_devices_with(
             devices
                 .into_iter()
                 .zip(channels)
                 .map(|(device, channel)| (device, change_host_cassette(channel)))
                 .collect(),
+            true,
+            Duration::from_secs(3),
         )
         .await;
         pair.start_crossing();
@@ -2622,8 +2792,8 @@ mod tests {
         .expect("both devices must switch before arrival tracking begins");
 
         pair.arrive_indices(&[0]).await;
-        // Past the receiver's 8 s arm deadline.
-        tokio::time::timeout(Duration::from_secs(12), async {
+        // Past the receiver's (shortened) arm deadline.
+        tokio::time::timeout(Duration::from_secs(8), async {
             while !pair.receiver.handoffs.has_completed_incoming().await {
                 tokio::task::yield_now().await;
             }
@@ -2684,6 +2854,248 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_bluetooth_device_absent_from_the_receiver_is_accepted_and_arrives() {
+        // A Bluetooth device connected to the sender leaves no node on the
+        // receiver: its inventory does not list the device at all.
+        let mut mouse = test_device("mouse", 0xb35b, DeviceKind::Mouse, "bt-mouse");
+        mouse.config_key = "serial:FLOW-TEST-mouse".into();
+        let mut pair = TestFlowPair::new_devices_with(
+            vec![(mouse, change_host_cassette("bt-mouse"))],
+            false,
+            super::super::handoff::ARM_TIMEOUT,
+        )
+        .await;
+        let stand_in = pair.receiver.devices_snapshot();
+        assert_eq!(
+            stand_in.len(),
+            1,
+            "an offline entry stands in for the device"
+        );
+        assert!(!stand_in[0].snapshot.online);
+        assert_eq!(stand_in[0].snapshot.kind, DeviceKind::Unknown);
+
+        pair.start_crossing();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !pair
+                .backend
+                .channel_completion("bt-mouse")
+                .is_ok_and(|completion| completion.is_complete())
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the receiver must accept, so the sender switches the device");
+
+        // The device connects to the receiver and its inventory lists it.
+        pair.arrive_all().await;
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !pair.receiver.handoffs.has_completed_incoming().await {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("receiver must record the arrival");
+        let result = pair
+            .receiver
+            .handoffs
+            .completed_incoming_result()
+            .await
+            .expect("completed handoff result");
+        assert_eq!(
+            result.outcome.as_known(),
+            Some(proto::HandoffOutcome::Arrived)
+        );
+        pair.close().await;
+    }
+
+    fn compiled_with(keys: &[&str]) -> CompiledFlowConfig {
+        CompiledFlowConfig {
+            enabled: true,
+            clipboard: true,
+            port: openlogi_flow::discovery::DEFAULT_PORT,
+            peers: Vec::new(),
+            layout: HashMap::new(),
+            devices: keys
+                .iter()
+                .map(|key| {
+                    (
+                        (*key).to_owned(),
+                        std::collections::BTreeMap::from([("self".into(), 0)]),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn a_configured_device_the_inventory_does_not_list_gets_an_offline_entry() {
+        let config = compiled_with(&[
+            "serial:2209LZ0ABC",
+            "unit:0f1e2d3c",
+            "direct:046d:b034:serial:9999",
+            "unit:00000000",
+            "receiver:abc:slot:1",
+        ]);
+        let devices = runtime_devices(&config, &[], &HashMap::new());
+        let mut keys: Vec<_> = devices
+            .iter()
+            .map(|device| device.snapshot.config_key.as_str())
+            .collect();
+        keys.sort_unstable();
+        // No physical identity in the key, no stand-in: it could not be told
+        // apart from any other device.
+        assert_eq!(
+            keys,
+            [
+                "direct:046d:b034:serial:9999",
+                "serial:2209LZ0ABC",
+                "unit:0f1e2d3c"
+            ]
+        );
+        assert!(devices.iter().all(|device| !device.snapshot.online
+            && device.snapshot.route.is_none()
+            && device.snapshot.kind == DeviceKind::Unknown));
+        let unit = devices
+            .iter()
+            .find(|device| device.snapshot.config_key == "unit:0f1e2d3c")
+            .expect("unit entry");
+        assert_eq!(unit.snapshot.unit_id, [0x0f, 0x1e, 0x2d, 0x3c]);
+        let serial = devices
+            .iter()
+            .find(|device| device.snapshot.config_key == "direct:046d:b034:serial:9999")
+            .expect("direct serial entry");
+        assert_eq!(serial.snapshot.serial.as_deref(), Some("9999"));
+    }
+
+    #[test]
+    fn an_away_device_keeps_what_the_inventory_last_said_about_it() {
+        let config = compiled_with(&["serial:FLOW-TEST-mouse"]);
+        let mut mouse = test_device("mouse", 0xb35b, DeviceKind::Mouse, "x");
+        mouse.config_key = "serial:FLOW-TEST-mouse".into();
+        mouse.unit_id = [1, 2, 3, 4];
+        let remembered = remember_configured(&config, &HashMap::new(), &[mouse]);
+        let away = runtime_devices(&config, &[], &remembered);
+        assert_eq!(away.len(), 1);
+        assert_eq!(away[0].snapshot.kind, DeviceKind::Mouse);
+        assert_eq!(away[0].identity.ids.len(), 2, "serial and unit id");
+        assert!(!away[0].snapshot.online && away[0].snapshot.route.is_none());
+
+        // A device the config no longer names is forgotten.
+        assert!(remember_configured(&compiled_with(&[]), &remembered, &[]).is_empty());
+    }
+
+    #[test]
+    fn a_device_listed_under_another_key_gets_no_stand_in() {
+        let config = compiled_with(&["serial:FLOW-TEST-mouse"]);
+        // Listed, but resolved to a route key with no Flow channels.
+        let mut mouse = test_device("mouse", 0xb35b, DeviceKind::Mouse, "x");
+        mouse.config_key = "direct:046d:b35b".into();
+        assert!(runtime_devices(&config, &[mouse], &HashMap::new()).is_empty());
+    }
+
+    fn mark(presence: Presence, ttl: Duration, age: Duration) -> (PresenceMark, Instant) {
+        let at = Instant::now();
+        (PresenceMark { presence, at, ttl }, at + age)
+    }
+
+    #[test]
+    fn a_direct_device_flow_sent_away_stays_away_while_a_stale_node_lists_it() {
+        let config = compiled_with(&["serial:FLOW-TEST-mouse"]);
+        let mut mouse = test_device("mouse", 0xb35b, DeviceKind::Mouse, "x");
+        mouse.config_key = "serial:FLOW-TEST-mouse".into();
+        let devices = runtime_devices(&config, std::slice::from_ref(&mouse), &HashMap::new());
+        let route = mouse.route.clone().expect("direct route");
+        assert_eq!(departed_ttl(&route), DIRECT_DEPARTED_TTL);
+
+        // Past the ordinary TTL, a departure of a direct device still holds.
+        let (departed, now) = mark(
+            Presence::Departed,
+            departed_ttl(&route),
+            PRESENCE_TTL + Duration::from_secs(1),
+        );
+        let record = HashMap::from([(mouse.config_key.clone(), departed)]);
+        assert!(
+            !apply_presence(devices.clone(), &record, now)[0]
+                .snapshot
+                .online
+        );
+        // ...and expires in the end.
+        let (expired, now) = mark(
+            Presence::Departed,
+            DIRECT_DEPARTED_TTL,
+            DIRECT_DEPARTED_TTL + Duration::from_secs(1),
+        );
+        let record = HashMap::from([(mouse.config_key.clone(), expired)]);
+        assert!(apply_presence(devices, &record, now)[0].snapshot.online);
+
+        // A receiver route keeps the ordinary TTL.
+        let bolt = DeviceRoute::Bolt {
+            receiver_uid: "r".into(),
+            slot: 1,
+        };
+        assert_eq!(departed_ttl(&bolt), PRESENCE_TTL);
+    }
+
+    #[test]
+    fn the_inventory_agreeing_ends_a_presence_record() {
+        let mut mouse = test_device("mouse", 0xb35b, DeviceKind::Mouse, "x");
+        let (departed, _) = mark(Presence::Departed, PRESENCE_TTL, Duration::ZERO);
+        // Gone from the inventory, or listed offline: it left.
+        assert!(departed.agrees_with(None));
+        mouse.online = false;
+        assert!(departed.agrees_with(Some(&mouse)));
+        mouse.online = true;
+        assert!(!departed.agrees_with(Some(&mouse)));
+
+        let (arrived, _) = mark(Presence::Arrived, PRESENCE_TTL, Duration::ZERO);
+        assert!(arrived.agrees_with(Some(&mouse)));
+        assert!(!arrived.agrees_with(None));
+        mouse.online = false;
+        assert!(!arrived.agrees_with(Some(&mouse)));
+    }
+
+    #[test]
+    fn a_keyboard_that_left_no_node_counts_as_departed() {
+        let config = compiled_with(&["serial:FLOW-TEST-keyboard"]);
+        let mut keyboard = test_device("keyboard", 0xb35c, DeviceKind::Keyboard, "x");
+        keyboard.config_key = "serial:FLOW-TEST-keyboard".into();
+        let state = GenerationState::new(
+            Arc::new(config),
+            std::slice::from_ref(&keyboard),
+            Arc::new(ObservableState::new("flow-test".into())),
+            ChannelPool::with_backend(Arc::new(
+                ReplayBackend::new(
+                    ReplayTopology {
+                        nodes: Vec::new(),
+                        channels: Vec::new(),
+                    },
+                    Vec::new(),
+                )
+                .expect("empty replay backend"),
+            )),
+            crate::receiver_access::ReceiverAccess::default(),
+            Arc::new(ClipboardManager::new(
+                crate::flow::clipboard::default_backend(),
+            )),
+        );
+        let keys = vec![keyboard.config_key.clone()];
+        assert!(!state.all_departed(&keys));
+        state.note_presence_for(
+            [(keys[0].as_str(), DIRECT_DEPARTED_TTL)],
+            Presence::Departed,
+        );
+        assert!(state.all_departed(&keys));
+        // Its node goes away: the record has done its job, and the device
+        // still reads as gone.
+        state.update_devices(&[]);
+        assert!(state.all_departed(&keys));
+        // It comes back (an Easy-Switch press): here again at once.
+        state.update_devices(std::slice::from_ref(&keyboard));
+        assert!(!state.all_departed(&keys));
+    }
+
+    #[tokio::test]
     async fn failed_change_host_cancels_accepted_handoff_without_arrival_result() {
         const CHANNEL: &str = "flow-change-host-failure";
         let pair = TestFlowPair::new(change_host_feature_missing_cassette(CHANNEL)).await;
@@ -2731,6 +3143,9 @@ mod tests {
         sender: Arc<GenerationState>,
         receiver: Arc<GenerationState>,
         receiver_snapshots: Vec<FlowDeviceSnapshot>,
+        /// Which of `receiver_snapshots` the receiver's inventory lists: a
+        /// receiver lists away devices offline, a Bluetooth host not at all.
+        receiver_lists: Vec<bool>,
         sender_connection: Arc<FlowConnection>,
         receiver_connection: Arc<FlowConnection>,
         application_loops: [JoinHandle<()>; 2],
@@ -2747,11 +3162,19 @@ mod tests {
             .await
         }
 
+        async fn new_devices(devices: Vec<(FlowDeviceSnapshot, HidCassette)>) -> Self {
+            Self::new_devices_with(devices, true, super::super::handoff::ARM_TIMEOUT).await
+        }
+
         #[expect(
             clippy::too_many_lines,
             reason = "the shared test fixture wires both peers, QUIC, and replay backend"
         )]
-        async fn new_devices(devices: Vec<(FlowDeviceSnapshot, HidCassette)>) -> Self {
+        async fn new_devices_with(
+            devices: Vec<(FlowDeviceSnapshot, HidCassette)>,
+            receiver_lists_away_devices: bool,
+            receiver_arm_timeout: Duration,
+        ) -> Self {
             let product_ids: HashMap<_, _> = devices
                 .iter()
                 .map(|(snapshot, _)| match snapshot.route.as_ref() {
@@ -2853,12 +3276,16 @@ mod tests {
                 )
                 .expect("empty receiver replay backend"),
             );
-            let receiver = Arc::new(test_generation(
+            let receiver_lists = vec![receiver_lists_away_devices; receiver_snapshots.len()];
+            let mut receiver = test_generation_with(
                 sender_key,
                 "sender",
                 &receiver_snapshots,
+                &listed(&receiver_snapshots, &receiver_lists),
                 ChannelPool::with_backend(empty_backend),
-            ));
+            );
+            receiver.handoffs = HandoffBook::with_arm_timeout(receiver_arm_timeout);
+            let receiver = Arc::new(receiver);
             sender.set_connection(receiver_key, Some(Arc::clone(&sender_connection)));
             receiver.set_connection(sender_key, Some(Arc::clone(&receiver_connection)));
             let sender_loop = tokio::spawn(run_application_connection(
@@ -2877,6 +3304,7 @@ mod tests {
                 sender,
                 receiver,
                 receiver_snapshots,
+                receiver_lists,
                 sender_connection,
                 receiver_connection,
                 application_loops: [sender_loop, receiver_loop],
@@ -2920,8 +3348,10 @@ mod tests {
         async fn arrive_indices(&mut self, indices: &[usize]) {
             for &index in indices {
                 self.receiver_snapshots[index].online = true;
+                self.receiver_lists[index] = true;
             }
-            self.receiver.update_devices(&self.receiver_snapshots);
+            self.receiver
+                .update_devices(&listed(&self.receiver_snapshots, &self.receiver_lists));
             inventory_changed(Arc::clone(&self.receiver)).await;
         }
 
@@ -2958,13 +3388,35 @@ mod tests {
         )
     }
 
+    /// The snapshots an inventory lists.
+    fn listed(snapshots: &[FlowDeviceSnapshot], lists: &[bool]) -> Vec<FlowDeviceSnapshot> {
+        snapshots
+            .iter()
+            .zip(lists)
+            .filter(|(_, listed)| **listed)
+            .map(|(snapshot, _)| snapshot.clone())
+            .collect()
+    }
+
     fn test_generation(
         peer: PublicKey,
         peer_name: &str,
         snapshots: &[FlowDeviceSnapshot],
         channel_pool: ChannelPool,
     ) -> GenerationState {
-        let devices = snapshots
+        test_generation_with(peer, peer_name, snapshots, snapshots, channel_pool)
+    }
+
+    /// A generation configured for the `configured` devices whose inventory
+    /// lists `listed`.
+    fn test_generation_with(
+        peer: PublicKey,
+        peer_name: &str,
+        configured: &[FlowDeviceSnapshot],
+        listed: &[FlowDeviceSnapshot],
+        channel_pool: ChannelPool,
+    ) -> GenerationState {
+        let devices = configured
             .iter()
             .map(|snapshot| {
                 (
@@ -2987,7 +3439,7 @@ mod tests {
                 layout: HashMap::from([(EdgeSide::Right, 0)]),
                 devices,
             }),
-            snapshots,
+            listed,
             Arc::new(ObservableState::new("flow-test".into())),
             channel_pool,
             crate::receiver_access::ReceiverAccess::default(),

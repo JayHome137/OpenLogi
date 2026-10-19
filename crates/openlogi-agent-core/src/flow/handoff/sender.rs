@@ -13,7 +13,10 @@ use crate::flow::runtime::{GenerationState, OutgoingDevice};
 
 const NETWORK_SLACK: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-const MAX_PEER_ARM_TIMEOUT: Duration = Duration::from_secs(10);
+/// The longest arrival wait a receiver may announce. Above this machine's own
+/// [`super::ARM_TIMEOUT`], so two machines on the same build always agree.
+const MAX_PEER_ARM_TIMEOUT: Duration = Duration::from_secs(40);
+const _: () = assert!(MAX_PEER_ARM_TIMEOUT.as_millis() > super::ARM_TIMEOUT.as_millis());
 
 pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: EdgeCrossing) {
     if !state.is_active()

@@ -304,3 +304,42 @@ async fn disconnect_drops_completed_replay_for_the_old_session() {
 
     assert!(!book.has_completed_incoming().await);
 }
+
+#[tokio::test]
+async fn a_device_never_seen_here_takes_its_pointer_role_from_the_sender() {
+    let book = HandoffBook::default();
+    let peer = PublicKey::new([7; 32]);
+    let mut absent = device("mouse", 1, false);
+    absent.snapshot.kind = DeviceKind::Unknown;
+    let local = vec![absent];
+    let mut sent = request(20, &local);
+    sent.devices[0].category = proto::DeviceCategory::Mouse.into();
+    assert!(matches!(
+        book.arm(peer, &sent, &local, true).await,
+        ArmDecision::New(_)
+    ));
+    assert!(book.mark_accepted(peer, 20).await);
+    // Pointing devices carry the pointer: the entry is there to warp to.
+    assert!(book.pointer_entry(peer, 20).await.is_some());
+
+    let other = HandoffBook::default();
+    sent.transfer_id = 21;
+    sent.devices[0].category = proto::DeviceCategory::Keyboard.into();
+    other.arm(peer, &sent, &local, true).await;
+    assert!(other.mark_accepted(peer, 21).await);
+    assert!(other.pointer_entry(peer, 21).await.is_none());
+}
+
+#[test]
+fn the_receiver_announces_the_arrival_wait_it_keeps() {
+    let accept = accept(5, ARM_TIMEOUT);
+    assert_eq!(
+        u128::from(accept.arm_timeout_ms),
+        ARM_TIMEOUT.as_millis(),
+        "the sender waits for exactly what the receiver keeps"
+    );
+    assert_eq!(
+        HandoffBook::with_arm_timeout(Duration::from_secs(2)).arm_timeout,
+        Duration::from_secs(2)
+    );
+}

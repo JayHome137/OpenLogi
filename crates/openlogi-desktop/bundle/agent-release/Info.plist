@@ -37,5 +37,15 @@
   <true/>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <!-- Flow runs in the agent: it browses and advertises its mDNS service and
+       talks QUIC to other computers on the local network, which macOS 15+
+       gates behind Local Network privacy. The service type must match
+       openlogi_flow::discovery::SERVICE_TYPE. -->
+  <key>NSLocalNetworkUsageDescription</key>
+  <string>OpenLogi Flow connects to your other computers on the local network to move the mouse, keyboard and clipboard between them.</string>
+  <key>NSBonjourServices</key>
+  <array>
+    <string>_openlogi-flow._udp</string>
+  </array>
 </dict>
 </plist>
