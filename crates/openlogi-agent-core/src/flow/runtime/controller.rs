@@ -407,7 +407,10 @@ async fn run_controller(
                 let _ = reply.send(result);
             }
             Control::Paste => {
-                let Some(active) = &generation else {
+                let Some(active) = generation
+                    .as_ref()
+                    .filter(|active| active.state.config.clipboard)
+                else {
                     continue;
                 };
                 let Some((peer, sequence, mime, offset)) =

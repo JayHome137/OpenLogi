@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// This is persisted configuration only. Discovery, transport, and device
 /// handoff live outside `openlogi-core`.
-#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct FlowConfig {
     /// Whether Flow handoff is enabled.
@@ -18,6 +18,15 @@ pub struct FlowConfig {
     /// screen edge.
     #[serde(default)]
     pub require_modifier: bool,
+    /// Whether the clipboard is shared with connected peers: local copies are
+    /// announced to them and their copies are prefetched for paste. On by
+    /// default; `false` stops polling, announcing, prefetching and serving
+    /// clipboard data.
+    #[serde(
+        default = "default_clipboard",
+        skip_serializing_if = "is_default_clipboard"
+    )]
+    pub clipboard: bool,
     /// Trusted peer machines.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub peers: Vec<FlowPeer>,
@@ -27,6 +36,31 @@ pub struct FlowConfig {
     /// Devices that participate in Flow and their per-machine host channels.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub devices: Vec<FlowDevice>,
+}
+
+impl Default for FlowConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            require_modifier: false,
+            clipboard: default_clipboard(),
+            peers: Vec::new(),
+            layout: Vec::new(),
+            devices: Vec::new(),
+        }
+    }
+}
+
+const fn default_clipboard() -> bool {
+    true
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes the field by reference"
+)]
+const fn is_default_clipboard(clipboard: &bool) -> bool {
+    *clipboard
 }
 
 impl FlowConfig {

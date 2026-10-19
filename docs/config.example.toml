@@ -27,6 +27,9 @@ app_icon = "openlogi"
 # [flow]
 # enabled = true
 # require_modifier = false
+# Share the clipboard with connected peers (default true). With false, copies
+# are neither announced to peers nor prefetched from them.
+# clipboard = true
 #
 # [[flow.peers]]
 # name = "work-laptop"

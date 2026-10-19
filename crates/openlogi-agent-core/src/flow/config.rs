@@ -9,6 +9,8 @@ use thiserror::Error;
 #[derive(Clone, Debug)]
 pub(super) struct CompiledFlowConfig {
     pub(super) enabled: bool,
+    /// Whether clipboard sharing is on (`[flow] clipboard`).
+    pub(super) clipboard: bool,
     pub(super) peers: Vec<CompiledPeer>,
     pub(super) layout: HashMap<EdgeSide, usize>,
     pub(super) devices: BTreeMap<String, BTreeMap<String, u8>>,
@@ -89,6 +91,7 @@ impl CompiledFlowConfig {
 
         Ok(Self {
             enabled: config.enabled,
+            clipboard: config.clipboard,
             peers,
             layout,
             devices,
@@ -193,6 +196,7 @@ mod tests {
         let config = FlowConfig {
             enabled: true,
             require_modifier: true,
+            clipboard: true,
             peers: vec![FlowPeer {
                 name: "desk".into(),
                 public_key: key("ab"),

@@ -576,6 +576,15 @@ impl ClipboardManager {
         self.state.lock().await.remote.clear();
     }
 
+    /// Drops every local and remote clipboard generation and anything staged,
+    /// for when clipboard sharing is switched off.
+    pub(crate) async fn forget_all(&self) {
+        self.reset_remote().await;
+        let mut state = self.state.lock().await;
+        state.local = None;
+        state.local_files = None;
+    }
+
     /// Select the newest announced representation that has not been prefetched.
     /// This remains the fallback when a paste arrives before announce-triggered
     /// prefetching has completed.
@@ -1396,6 +1405,25 @@ mod tests {
         assert_eq!(manager.pending_fetch().await, None);
         assert!(!manager.apply_staged());
         assert_eq!(backend.read_text(), Some(b"local".to_vec()));
+    }
+
+    #[tokio::test]
+    async fn forget_all_drops_local_generations_and_staged_values() {
+        let backend = Arc::new(MemoryClipboard::default());
+        *backend.value.lock().unwrap() = Some(b"local secret".to_vec());
+        let manager = ClipboardManager::new(Arc::clone(&backend) as Arc<dyn ClipboardBackend>);
+        let announce = manager.poll_local().await.expect("local announcement");
+        stage_remote_text(&manager, b"remote").await;
+
+        manager.forget_all().await;
+
+        assert_eq!(
+            manager.fetch(announce.sequence, TEXT_MIME, 0).await,
+            Err(ClipboardError::Unavailable)
+        );
+        assert_eq!(manager.request_paste(), PasteOutcome::NothingStaged);
+        assert_eq!(manager.pending_fetch().await, None);
+        assert_eq!(backend.read_text(), Some(b"local secret".to_vec()));
     }
 
     /// Records which thread writes and can be made slow.

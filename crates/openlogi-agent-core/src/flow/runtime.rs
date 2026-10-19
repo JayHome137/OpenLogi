@@ -119,11 +119,16 @@ impl FlowGeneration {
         let identity = tokio::task::spawn_blocking(load_machine_identity)
             .await
             .map_err(|error| FlowRuntimeError::IdentityTask(error.to_string()))??;
-        let capabilities = vec![
-            EnumValue::from(proto::Capability::ClipboardText as i32),
-            #[cfg(any(target_os = "macos", target_os = "windows"))]
-            EnumValue::from(proto::Capability::ClipboardFiles as i32),
-        ];
+        // With clipboard sharing off, advertise no clipboard capability.
+        let capabilities = if config.clipboard {
+            vec![
+                EnumValue::from(proto::Capability::ClipboardText as i32),
+                #[cfg(any(target_os = "macos", target_os = "windows"))]
+                EnumValue::from(proto::Capability::ClipboardFiles as i32),
+            ]
+        } else {
+            Vec::new()
+        };
         let hello = proto::Hello {
             proto_min: PROTOCOL_MIN,
             proto_max: PROTOCOL_MAX,
@@ -198,7 +203,12 @@ impl FlowGeneration {
         let pairing_window = Arc::new(AtomicBool::new(false));
         let handles: Vec<_> = sessions.peers().cloned().collect();
         let mut tasks = Vec::with_capacity(handles.len() * 2 + 2);
-        tasks.push(tokio::spawn(run_clipboard_loop(Arc::clone(&state))));
+        if state.config.clipboard {
+            tasks.push(tokio::spawn(run_clipboard_loop(Arc::clone(&state))));
+        } else {
+            // Nothing captured before the switch may still be served or pasted.
+            state.clipboard.forget_all().await;
+        }
         tasks.push(tokio::spawn(run_pairing_acceptor(
             Arc::clone(&state),
             trust.clone(),
@@ -2395,6 +2405,7 @@ mod tests {
         GenerationState::new(
             Arc::new(CompiledFlowConfig {
                 enabled: true,
+                clipboard: true,
                 peers: vec![super::super::config::CompiledPeer {
                     name: peer_name.into(),
                     public_key: peer,
