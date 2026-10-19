@@ -2031,6 +2031,7 @@ mod tests {
         pair.backend
             .require_complete()
             .expect("ChangeHost cassette fully consumed");
+        pair.assert_lifecycle_free_while_awaiting_arrival().await;
 
         pair.arrive_all().await;
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -2388,6 +2389,23 @@ mod tests {
                     velocity: openlogi_hook::edge::Velocity { x: 1.0, y: 0.0 },
                 },
             );
+        }
+
+        /// The host switch is done and the sender now waits for the arrival
+        /// acknowledgment: that wait must not hold the generation's lifecycle
+        /// lock, or a config reload would stall behind the peer.
+        async fn assert_lifecycle_free_while_awaiting_arrival(&self) {
+            tokio::time::timeout(Duration::from_secs(1), async {
+                while !self.sender.handoffs.has_outgoing().await {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("sender is waiting for the arrival acknowledgment");
+            let _lifecycle =
+                tokio::time::timeout(Duration::from_secs(1), self.sender.lifecycle.lock())
+                    .await
+                    .expect("lifecycle lock is free while the arrival is pending");
         }
 
         async fn arrive_all(&mut self) {

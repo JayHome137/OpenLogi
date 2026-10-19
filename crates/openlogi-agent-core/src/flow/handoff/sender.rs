@@ -8,7 +8,8 @@ use openlogi_hook::edge::{EdgeCrossing, EdgeSide};
 use tracing::{debug, info, warn};
 
 use super::OutgoingSignal;
-use crate::flow::runtime::GenerationState;
+use crate::flow::config::CompiledPeer;
+use crate::flow::runtime::{GenerationState, OutgoingDevice};
 
 const NETWORK_SLACK: Duration = Duration::from_secs(2);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
@@ -32,33 +33,58 @@ pub(in crate::flow) fn start_outgoing(state: Arc<GenerationState>, crossing: Edg
     });
 }
 
-async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
-    // A config reload deactivates a generation at this lock boundary. Once a
-    // peer accepts, keep the bounded handoff transaction on one generation
-    // through its arrival acknowledgment so stale config cannot switch hosts.
+/// What a crossing hands off, captured from one consistent generation view.
+struct OutgoingPlan {
+    peer: CompiledPeer,
+    connection: Arc<FlowConnection>,
+    targets: Vec<OutgoingDevice>,
+}
+
+/// Validates a crossing under the lifecycle lock and releases it again.
+///
+/// The lock is held only for this snapshot and later around the host switch
+/// itself, never across the network round trips (up to ~2 s for acceptance
+/// and ~12 s for the arrival acknowledgment). Holding it for the whole
+/// transaction stalled config reloads (`shutdown`), link-state updates and
+/// incoming handoffs for as long as the peer took to answer.
+async fn plan_outgoing(state: &GenerationState, crossing: EdgeCrossing) -> Option<OutgoingPlan> {
     let _lifecycle = state.lifecycle.lock().await;
     if !state.is_active() {
-        return;
+        return None;
     }
-    let Some(peer) = state.layout_peer(crossing.side) else {
-        return;
-    };
+    let peer = state.layout_peer(crossing.side)?.clone();
     let Some(connection) = state.connection(peer.public_key) else {
         debug!(peer = %peer.name, "Flow edge ignored while peer is disconnected");
-        return;
+        return None;
     };
     let targets = state.outgoing_devices(&peer.name);
     if targets.is_empty() {
         warn!(peer = %peer.name, "Flow edge has no online configured devices to hand off");
-        return;
+        return None;
     }
     if state.remote_holds_any(peer.public_key, &targets) {
         warn!(
             peer = %peer.name,
             "Flow edge ignored because the peer still reports one target device as held"
         );
-        return;
+        return None;
     }
+    Some(OutgoingPlan {
+        peer,
+        connection,
+        targets,
+    })
+}
+
+async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
+    let Some(OutgoingPlan {
+        peer,
+        connection,
+        targets,
+    }) = plan_outgoing(state, crossing).await
+    else {
+        return;
+    };
 
     let transfer_id = random_transfer_id();
     let mut request = proto::HandoffRequest {
@@ -85,7 +111,15 @@ async fn run_outgoing(state: &Arc<GenerationState>, crossing: EdgeCrossing) {
         state.handoffs.remove_outgoing(transfer_id).await;
         return;
     };
-    match state.switch_devices(&targets).await {
+    // A config reload deactivates a generation at this lock boundary: the
+    // host switch runs entirely on the generation that accepted, or not at
+    // all (switch_devices re-checks `is_active` under the lock and returns
+    // Ok(false), which cancels the peer's pending arrival).
+    let switched = {
+        let _lifecycle = state.lifecycle.lock().await;
+        state.switch_devices(&targets).await
+    };
+    match switched {
         Ok(true) => {}
         Ok(false) => {
             state.handoffs.remove_outgoing(transfer_id).await;
