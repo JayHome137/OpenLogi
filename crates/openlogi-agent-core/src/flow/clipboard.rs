@@ -366,9 +366,18 @@ impl ClipboardManager {
     /// Reads the host clipboard and returns a new announcement only when text
     /// changed. A write caused by a remote peer is consumed without rebroadcast.
     pub(crate) async fn poll_local(&self) -> Option<proto::ClipboardAnnounce> {
-        if let Some(paths) = self.backend.read_files()
-            && let Some(files) = collect_files(paths)
-        {
+        // Backend reads block: macOS hops to the main thread for NSPasteboard
+        // and the file listing stats every path, so keep them off the runtime.
+        let backend = Arc::clone(&self.backend);
+        let (files, text) = tokio::task::spawn_blocking(move || {
+            match backend.read_files().and_then(collect_files) {
+                Some(files) => (Some(files), None),
+                None => (None, backend.read_text()),
+            }
+        })
+        .await
+        .ok()?;
+        if let Some(files) = files {
             let mut state = self.state.lock().await;
             let changed = state
                 .local_files
@@ -393,7 +402,7 @@ impl ClipboardManager {
             state.local_files = Some(files);
             return Some(announce);
         }
-        let bytes = self.backend.read_text()?;
+        let bytes = text?;
         if bytes.len() > MAX_CLIPBOARD_BYTES {
             return None;
         }
