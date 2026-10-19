@@ -196,12 +196,17 @@ impl FlowController {
         if let Ok(mut settings) = self.inner.edge_settings.write() {
             *settings = edge_settings(config, revision);
         }
+        let armed = self.inner.armed.load(Ordering::Acquire);
         let command = match change {
-            FlowChange::None | FlowChange::Edges => return,
-            FlowChange::Layout => Control::Relayout(config.clone()),
-            FlowChange::Restart => Control::Reconfigure(config.clone()),
+            FlowChange::None => return,
+            // The edge input reads the new settings itself; a running
+            // generation keeps publishing its own live status.
+            FlowChange::Edges if armed => return,
+            FlowChange::Edges => None,
+            FlowChange::Layout => Some(Control::Relayout(config.clone())),
+            FlowChange::Restart => Some(Control::Reconfigure(config.clone())),
         };
-        if self.inner.armed.load(Ordering::Acquire) && self.inner.control_tx.send(command).is_ok() {
+        if armed && command.is_some_and(|command| self.inner.control_tx.send(command).is_ok()) {
             return;
         }
         self.inner.observable.set_flow(status_from_config(config));
