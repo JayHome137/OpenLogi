@@ -349,3 +349,31 @@ fn suspend_and_side_changes_preserve_crossing_latch() {
     );
     assert!(!detector.is_latched());
 }
+
+#[test]
+fn arrival_inset_is_outside_contact_band_even_for_exclusive_bounds() {
+    let params = EdgeDetectorParams::default();
+    // On exclusive right/bottom bounds the last reachable pixel is one unit
+    // inside the edge coordinate, so the arrival must clear tolerance + 1.
+    assert!(ARRIVAL_INSET > params.edge_tolerance + 1.0);
+    assert!(ARRIVAL_INSET < params.rearm_distance);
+
+    let display = rect(0.0, 0.0, 100.0, 100.0);
+    let mut detector = EdgeDetector::new(
+        ExposedEdges::from_displays(&[display]),
+        ArmedSides::ALL,
+        dwell_params(),
+    );
+    for (millis, position) in [
+        (0, point(ARRIVAL_INSET, 50.0)),
+        (300, point(ARRIVAL_INSET, 50.0)),
+        (600, point(100.0 - ARRIVAL_INSET, 50.0)),
+        (900, point(100.0 - ARRIVAL_INSET, 50.0)),
+    ] {
+        assert!(
+            detector
+                .update(position, Duration::from_millis(millis))
+                .is_none()
+        );
+    }
+}

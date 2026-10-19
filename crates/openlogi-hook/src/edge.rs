@@ -7,7 +7,9 @@
 mod detector;
 mod geometry;
 
-pub use detector::{ArmedSides, EdgeCrossing, EdgeDetector, EdgeDetectorParams, Velocity};
+pub use detector::{
+    ARRIVAL_INSET, ArmedSides, EdgeCrossing, EdgeDetector, EdgeDetectorParams, Velocity,
+};
 pub use geometry::{DisplayGeometryProvider, DisplayRect, EdgeSegment, ExposedEdges};
 
 /// A side of a display in a coordinate space where x increases rightward and y

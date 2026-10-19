@@ -89,6 +89,17 @@ pub struct EdgeDetectorParams {
     pub cooldown: Duration,
 }
 
+/// How far inside the arrival edge a handed-off cursor is placed, in logical
+/// pixels.
+///
+/// It must stay clearly outside the default [`EdgeDetectorParams::edge_tolerance`]
+/// band, even on platforms whose right and bottom display bounds are exclusive
+/// (the last reachable pixel is one unit inside the edge coordinate), or a
+/// cursor left resting where it arrived would dwell on the edge pointing back
+/// at the sender and bounce straight back. It also stays below
+/// `rearm_distance`, so the arrival is still visibly at the edge.
+pub const ARRIVAL_INSET: f64 = 6.0;
+
 impl Default for EdgeDetectorParams {
     fn default() -> Self {
         Self {

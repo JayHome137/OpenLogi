@@ -30,7 +30,7 @@ use openlogi_flow::transport::{
     SessionTrust, error_envelope, message_envelope,
 };
 use openlogi_hid::{ChannelPool, DeviceRoute};
-use openlogi_hook::edge::{EdgeSide, ExposedEdges};
+use openlogi_hook::edge::{ARRIVAL_INSET, EdgeSide, ExposedEdges};
 use openlogi_ipc::{FlowLinkState, FlowPeerStatus, FlowStatus};
 use thiserror::Error;
 use tokio::sync::{Mutex, mpsc};
@@ -1641,8 +1641,16 @@ pub(super) fn warp_entry(entry: &proto::EntryPoint) {
     }
 }
 
+/// Where a handed-off cursor enters this machine: [`ARRIVAL_INSET`] inside the
+/// arrival edge, so it sits clearly outside the edge-contact band and a resting
+/// cursor cannot dwell its way straight back to the sender.
+///
+/// The along-edge position is kept the same inset away from both segment ends,
+/// so a corner arrival is not inside the perpendicular side's band either. As
+/// the inset exceeds the contact tolerance plus one pixel, this also holds on
+/// platforms with exclusive right and bottom bounds (Windows `rcMonitor`).
 fn point_on_edge(edges: &ExposedEdges, side: proto::Side, t: f64) -> Option<(f64, f64)> {
-    const INSET: f64 = 1.0;
+    const INSET: f64 = ARRIVAL_INSET;
     let side = match side {
         proto::Side::Left => EdgeSide::Left,
         proto::Side::Right => EdgeSide::Right,
@@ -1668,7 +1676,15 @@ fn point_on_edge(edges: &ExposedEdges, side: proto::Side, t: f64) -> Option<(f64
             false
         }
     })?;
-    let along = (segment.start() + offset).min(segment.end());
+    // Keep clear of the perpendicular edges too: an arrival in a corner would
+    // otherwise sit inside the neighbouring side's contact band.
+    let (low, high) = if segment.end() - segment.start() > 2.0 * INSET {
+        (segment.start() + INSET, segment.end() - INSET)
+    } else {
+        let middle = f64::midpoint(segment.start(), segment.end());
+        (middle, middle)
+    };
+    let along = (segment.start() + offset).clamp(low, high);
     Some(match side {
         EdgeSide::Left => (segment.coordinate() + INSET, along),
         EdgeSide::Right => (segment.coordinate() - INSET, along),
@@ -1798,11 +1814,11 @@ mod tests {
         let edges = ExposedEdges::from_displays(&displays);
         assert_eq!(
             point_on_edge(&edges, proto::Side::Left, 0.25),
-            Some((1.0, 50.0))
+            Some((ARRIVAL_INSET, 50.0))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Left, 0.75),
-            Some((1.0, 250.0))
+            Some((ARRIVAL_INSET, 250.0))
         );
     }
 
@@ -1812,29 +1828,58 @@ mod tests {
             ExposedEdges::from_displays(&[DisplayRect::new(0.0, 0.0, 100.0, 80.0).unwrap()]);
         assert_eq!(
             point_on_edge(&edges, proto::Side::Left, 0.25),
-            Some((1.0, 20.0))
+            Some((ARRIVAL_INSET, 20.0))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Right, 0.25),
-            Some((99.0, 20.0))
+            Some((100.0 - ARRIVAL_INSET, 20.0))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Top, 0.25),
-            Some((25.0, 1.0))
+            Some((25.0, ARRIVAL_INSET))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Bottom, 0.25),
-            Some((25.0, 79.0))
+            Some((25.0, 80.0 - ARRIVAL_INSET))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Right, -1.0),
-            Some((99.0, 0.0))
+            Some((100.0 - ARRIVAL_INSET, ARRIVAL_INSET))
         );
         assert_eq!(
             point_on_edge(&edges, proto::Side::Right, 2.0),
-            Some((99.0, 80.0))
+            Some((100.0 - ARRIVAL_INSET, 80.0 - ARRIVAL_INSET))
         );
         assert_eq!(point_on_edge(&edges, proto::Side::Unspecified, 0.5), None);
+    }
+
+    #[test]
+    fn a_resting_arrival_never_dwells_back_across_its_entry_edge() {
+        use openlogi_hook::CursorPosition;
+        use openlogi_hook::edge::{ArmedSides, EdgeDetector, EdgeDetectorParams};
+
+        let edges =
+            ExposedEdges::from_displays(&[DisplayRect::new(0.0, 0.0, 100.0, 80.0).unwrap()]);
+        for side in [
+            proto::Side::Left,
+            proto::Side::Right,
+            proto::Side::Top,
+            proto::Side::Bottom,
+        ] {
+            let (x, y) = point_on_edge(&edges, side, 1.0).expect("arrival point");
+            let mut detector = EdgeDetector::new(
+                edges.clone(),
+                ArmedSides::ALL,
+                EdgeDetectorParams::default(),
+            );
+            for millis in [0, 300, 600, 1_200] {
+                assert_eq!(
+                    detector.update(CursorPosition { x, y }, Duration::from_millis(millis)),
+                    None,
+                    "{side:?} arrival at ({x}, {y}) re-crossed"
+                );
+            }
+        }
     }
 
     #[test]
