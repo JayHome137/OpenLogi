@@ -7,7 +7,7 @@ use std::sync::{Arc, RwLock};
 use std::time::{Duration, Instant};
 
 use buffa::EnumValue;
-use openlogi_core::config::{Config, FlowPeer};
+use openlogi_core::config::{Config, ConfigError, ConfigFile, FlowPeer};
 use openlogi_flow::discovery::{
     CandidateSource, ManualCandidateSource, MdnsAdvertiser, MdnsCandidateSource, MdnsRecord,
     collect_candidates,
@@ -1453,6 +1453,88 @@ async fn handle_pairing_abort(
     }
 }
 
+/// How often a pairing commit retries a save another writer raced with.
+const PAIRING_SAVE_ATTEMPTS: usize = 5;
+
+/// Records a paired peer through the conflict-checked, locked config writer.
+///
+/// The peer is re-applied to a freshly loaded config on every attempt, so an
+/// edit another process (GUI, CLI, a hand edit) saved between our load and our
+/// save is kept instead of being overwritten by a stale copy — which is what
+/// the previous `Config::load_or_default` + `save_atomic` pair did. Returns
+/// the name the peer was stored under.
+fn persist_paired_peer(
+    load: impl Fn() -> Result<(Config, ConfigFile), ConfigError>,
+    public_key: &str,
+    machine_name: &str,
+    address: &str,
+) -> Result<String, ConfigError> {
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        let (mut config, mut file) = load()?;
+        let name = record_paired_peer(&mut config, public_key, machine_name, address);
+        match file.save(&config) {
+            Ok(()) => return Ok(name),
+            Err(error) if attempt < PAIRING_SAVE_ATTEMPTS && is_transient_save_error(&error) => {
+                warn!(%error, attempt, "Flow pairing config save raced another writer; retrying");
+                std::thread::sleep(Duration::from_millis(20 * attempt as u64));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+fn is_transient_save_error(error: &ConfigError) -> bool {
+    match error {
+        ConfigError::Conflict { .. } => true,
+        ConfigError::Write { source, .. } => source.kind() == io::ErrorKind::WouldBlock,
+        _ => false,
+    }
+}
+
+/// Adds or refreshes `public_key` in `config.flow.peers`, choosing a unique
+/// display name for a new peer. Returns the stored name.
+fn record_paired_peer(
+    config: &mut Config,
+    public_key: &str,
+    machine_name: &str,
+    address: &str,
+) -> String {
+    if let Some(peer) = config
+        .flow
+        .peers
+        .iter_mut()
+        .find(|peer| peer.public_key == public_key)
+    {
+        if !address.is_empty() && !peer.addresses.iter().any(|known| known == address) {
+            peer.addresses.push(address.to_owned());
+        }
+        return peer.name.clone();
+    }
+    let base_name = if machine_name.trim().is_empty() {
+        "OpenLogi peer".to_owned()
+    } else {
+        machine_name.trim().to_owned()
+    };
+    let mut name = base_name.clone();
+    let mut suffix = 2_u32;
+    while config.flow.peers.iter().any(|peer| peer.name == name) {
+        name = format!("{base_name} ({suffix})");
+        suffix = suffix.saturating_add(1);
+    }
+    config.flow.peers.push(FlowPeer {
+        name: name.clone(),
+        public_key: public_key.to_owned(),
+        addresses: if address.is_empty() {
+            Vec::new()
+        } else {
+            vec![address.to_owned()]
+        },
+    });
+    name
+}
+
 fn complete_pairing(
     state: &GenerationState,
     trust: &PeerTrust,
@@ -1461,61 +1543,28 @@ fn complete_pairing(
 ) -> Result<(), openlogi_ipc::FlowCommandError> {
     let key = active.session.peer_key();
     let public_key = format_public_key(key);
-    let mut config =
-        Config::load_or_default().map_err(|error| openlogi_ipc::FlowCommandError::Persistence {
-            message: error.to_string(),
-        })?;
-    let base_name = if active.machine_name.trim().is_empty() {
-        "OpenLogi peer".to_owned()
-    } else {
-        active.machine_name.trim().to_owned()
-    };
-    let mut name = base_name.clone();
-    let mut suffix = 2_u32;
-    while config
-        .flow
-        .peers
-        .iter()
-        .any(|peer| peer.name == name && peer.public_key != public_key)
-    {
-        name = format!("{base_name} ({suffix})");
-        suffix = suffix.saturating_add(1);
-    }
-    if let Some(peer) = config
-        .flow
-        .peers
-        .iter_mut()
-        .find(|peer| peer.public_key == public_key)
-    {
-        name.clone_from(&peer.name);
-        if !active.address.is_empty() && !peer.addresses.contains(&active.address) {
-            peer.addresses.push(active.address.clone());
-        }
-    } else {
-        config.flow.peers.push(FlowPeer {
-            name: name.clone(),
-            public_key: public_key.clone(),
-            addresses: if active.address.is_empty() {
-                Vec::new()
-            } else {
-                vec![active.address.clone()]
-            },
-        });
-    }
     active
         .connection
         .promote_after_pairing(&active.session)
         .map_err(pairing_command_error)?;
     let inserted_pin = trust.pin(key);
-    if let Err(error) = config.save_atomic() {
-        if inserted_pin {
-            let _ = trust.unpin(key);
+    let name = match persist_paired_peer(
+        ConfigFile::load_or_default,
+        &public_key,
+        &active.machine_name,
+        &active.address,
+    ) {
+        Ok(name) => name,
+        Err(error) => {
+            if inserted_pin {
+                let _ = trust.unpin(key);
+            }
+            active.connection.revoke_pairing_promotion();
+            return Err(openlogi_ipc::FlowCommandError::Persistence {
+                message: error.to_string(),
+            });
         }
-        active.connection.revoke_pairing_promotion();
-        return Err(openlogi_ipc::FlowCommandError::Persistence {
-            message: error.to_string(),
-        });
-    }
+    };
     trust.disable_pairing();
     state.set_pairing_phase(Some(openlogi_ipc::FlowPairingPhase::Paired {
         name: name.clone(),
@@ -1969,6 +2018,71 @@ mod tests {
                 & 0o777,
             0o600
         );
+    }
+
+    #[test]
+    fn pairing_save_keeps_an_edit_another_writer_made_after_our_load() {
+        let directory = tempdir().expect("temporary directory");
+        let path = directory.path().join("config.toml");
+        let mut seed = Config::default();
+        seed.flow.peers.push(FlowPeer {
+            name: "desk".to_owned(),
+            public_key: "existing-key".to_owned(),
+            addresses: Vec::new(),
+        });
+        seed.save_to_path(&path).expect("seed config");
+
+        let loads = std::cell::Cell::new(0);
+        let name = persist_paired_peer(
+            || {
+                let loaded = ConfigFile::load_from_path(&path);
+                if loads.replace(loads.get() + 1) == 0 {
+                    // Another process saves between our load and our save.
+                    let (mut other, mut file) =
+                        ConfigFile::load_from_path(&path).expect("concurrent load");
+                    other.flow.enabled = true;
+                    file.save(&other).expect("concurrent save");
+                }
+                loaded
+            },
+            "new-key",
+            " desk ",
+            "192.0.2.7:42424",
+        )
+        .expect("pairing save retries past the conflict");
+
+        assert_eq!(loads.get(), 2, "the conflicting save must reload once");
+        assert_eq!(name, "desk (2)");
+        let saved = Config::load_from_path(&path).expect("reload config");
+        assert!(saved.flow.enabled, "the concurrent edit must survive");
+        let peer = saved
+            .flow
+            .peers
+            .iter()
+            .find(|peer| peer.public_key == "new-key")
+            .expect("paired peer persisted");
+        assert_eq!(peer.name, "desk (2)");
+        assert_eq!(peer.addresses, ["192.0.2.7:42424"]);
+    }
+
+    #[test]
+    fn re_pairing_a_known_key_keeps_its_name_and_adds_the_address() {
+        let mut config = Config::default();
+        config.flow.peers.push(FlowPeer {
+            name: "laptop".to_owned(),
+            public_key: "key".to_owned(),
+            addresses: vec!["192.0.2.1:42424".to_owned()],
+        });
+        let name = record_paired_peer(&mut config, "key", "renamed", "192.0.2.2:42424");
+        assert_eq!(name, "laptop");
+        assert_eq!(config.flow.peers.len(), 1);
+        assert_eq!(
+            config.flow.peers[0].addresses,
+            ["192.0.2.1:42424", "192.0.2.2:42424"]
+        );
+        let again = record_paired_peer(&mut config, "key", "renamed", "192.0.2.2:42424");
+        assert_eq!(again, "laptop");
+        assert_eq!(config.flow.peers[0].addresses.len(), 2);
     }
 
     #[test]
