@@ -123,6 +123,10 @@ pub struct SettingsView {
     theme_filter: ThemeFilter,
     /// Free-text filter for the Appearance theme grid (search 50+ themes by name).
     theme_search: Entity<InputState>,
+    /// The Flow page's pairing address field.
+    flow_address: Entity<InputState>,
+    /// Re-renders the Flow page when the agent's Flow status changes.
+    _flow_obs: Subscription,
     /// Page selected when the window first opens. Consumed once by the Settings
     /// widget's keyed state, so it only steers a fresh open (an already-open
     /// window is just focused).
@@ -201,6 +205,7 @@ impl SettingsView {
 
         let theme_search =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr!("appearance.filter_themes")));
+        let (flow_address, flow_obs) = flow::watch(window, cx);
         cx.subscribe(&theme_search, |_, _, event: &InputEvent, cx| {
             if matches!(event, InputEvent::Change) {
                 cx.notify();
@@ -264,6 +269,8 @@ impl SettingsView {
             _installation_obs: installation_obs,
             theme_filter: ThemeFilter::All,
             theme_search,
+            flow_address,
+            _flow_obs: flow_obs,
             initial_page,
             language_select,
             asset_source_select,
@@ -388,6 +395,16 @@ impl AuxWindow for SettingsView {
 
 /// Open the Settings window on its default (General) page, or focus it if it's
 /// already open.
+/// Hand the agent's latest Flow status to the Flow page.
+pub fn flow_status(cx: &mut App, status: &openlogi_ipc::FlowStatus) {
+    flow::apply_status(cx, status);
+}
+
+/// Show a Flow pairing command the agent refused or never received.
+pub fn flow_refused(cx: &mut App, refusal: openlogi_ipc::FlowCommandError) {
+    flow::apply_refusal(cx, refusal);
+}
+
 pub fn open(cx: &mut App) {
     open_at(SettingsPage::General, cx);
 }
@@ -461,7 +478,7 @@ impl Render for SettingsView {
                 },
                 self.registration_status,
             ))
-            .page(flow::flow_page())
+            .page(flow::flow_page(self.flow_address.clone(), cx))
             .page(updates::updates_page(self.updater.clone()));
         // Registered only where grants exist to manage — see the `mod
         // permissions` cfg for why Windows skips it.
