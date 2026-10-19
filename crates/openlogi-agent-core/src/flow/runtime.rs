@@ -643,7 +643,9 @@ struct RemotePeerState {
 
 #[derive(Clone)]
 pub(super) struct OutgoingDevice {
-    key: String,
+    pub(super) key: String,
+    /// A mouse or other pointing device; anything else may carry held keys.
+    pub(super) pointing: bool,
     route: DeviceRoute,
     host: u8,
     pub(super) identity: proto::DeviceIdentity,
@@ -717,6 +719,17 @@ impl GenerationState {
         }
         self.device_revision.fetch_add(1, Ordering::Relaxed);
         self.peer_revision.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// Whether Flow's latest move of every one of `keys` was sending it away.
+    pub(super) fn all_departed(&self, keys: &[String]) -> bool {
+        self.presence.lock().is_ok_and(|record| {
+            keys.iter().all(|key| {
+                record
+                    .get(key)
+                    .is_some_and(|(presence, _)| *presence == Presence::Departed)
+            })
+        })
     }
 
     /// The devices with their inventory online state corrected by what Flow
@@ -966,6 +979,7 @@ impl GenerationState {
                 Some((
                     device.snapshot.kind,
                     OutgoingDevice {
+                        pointing: is_pointing_device(device.snapshot.kind),
                         key: device.snapshot.config_key,
                         route,
                         host,

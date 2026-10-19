@@ -145,6 +145,7 @@ async fn run_outgoing(
         Ok(true) => {
             // Peers see the devices gone now, not once the inventory notices.
             state.publish_device_state().await;
+            release_departed_modifiers(state, &targets);
         }
         Ok(false) => {
             state.handoffs.remove_outgoing(transfer_id).await;
@@ -204,6 +205,39 @@ async fn await_acknowledgment(state: &GenerationState, acknowledgment: Acknowled
             warn!(peer, transfer_id, "Flow arrival acknowledgment timed out");
         }
     }
+}
+
+/// How long a departed keyboard's modifiers are left alone, so a receiver
+/// that releases keys on disconnect does so first.
+const MODIFIER_RELEASE_DELAY: Duration = Duration::from_millis(300);
+
+/// A keyboard that left with a modifier down (Ctrl held to cross, say) never
+/// sends its release here; release what is still down once it has gone.
+fn release_departed_modifiers(state: &Arc<GenerationState>, targets: &[OutgoingDevice]) {
+    let keys: Vec<String> = targets
+        .iter()
+        .filter(|target| !target.pointing)
+        .map(|target| target.key.clone())
+        .collect();
+    if keys.is_empty() {
+        // Every keyboard stayed: a modifier down now is held on purpose.
+        return;
+    }
+    let state = Arc::clone(state);
+    tokio::spawn(async move {
+        tokio::time::sleep(MODIFIER_RELEASE_DELAY).await;
+        if !state.all_departed(&keys) {
+            // A keyboard came back: what it holds down now is held.
+            return;
+        }
+        let released = openlogi_inject::release_stuck_modifiers();
+        if released > 0 {
+            info!(
+                released,
+                "Flow released modifier keys the departed keyboard left down"
+            );
+        }
+    });
 }
 
 async fn request_acceptance(
