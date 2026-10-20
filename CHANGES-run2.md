@@ -120,3 +120,23 @@
 
 ## 离线测试结果 (2026-10-20, `tools/run-offline-tests.sh`, 日志 `test-logs/`)
 见 `test-logs/SUMMARY.txt`; 全部 PASS。PSSA 剩余 19 条 Warning (空 catch 块为有意的尽力而为; 两条未用参数), 0 Error, 0 兼容性问题。
+
+## 第三轮修复 (2026-10-20 17:49 GM 复核后)
+1. Mac: Options+ 界面 / LogiPluginService 的测试前状态在**启用自动恢复之前**记录 (`record_optionsplus_prestate`, run 脚本); 未观察到 → state 中不写 → 恢复时不碰 (`HT_GUI_STATE_KNOWN` / `HT_PLUGIN_STATE_KNOWN` 默认 0)。之前 PAT/下载失败会让恢复杀掉 Jay 打开的 Options+ 窗口。
+2. Windows: Options+ 窗口 (`logioptionsplus`) 移出停止清单 (`allowlist.json` 新键 `optionsPlusGui`), 脚本从不结束它。预检提示; Run 在改动前停在 GATE W0 让 Jay 自己关, 回车重查 / abort 退出, 不关就不继续。(UNVERIFIED: 点 X 后进程是否真的退出。)
+3. 脚本里的 RUNBOOK 步骤号与 RUNBOOK 对齐 (Windows → Mac 第 4 步; Mac → Windows 第 3 步; 残留 → 第 9 步)。
+4. Mac 不用 PAT: Jay 在 Mac 浏览器下载 `OpenLogi-macos-dmg-arm64`, `--artifact` 接受 zip / dmg / Safari 自动解压的文件夹 (`artifact_to_dmg`)。Windows 保留 PAT 或 `-ArtifactZip`。
+5. `tccutil reset` 移到删除 OpenLogi.app 之前。
+6. RUNBOOK 第 8/9 步: Mac 重启后的紧急恢复路径; 登录项与扩展; 删除全部 openlogi-agent 防火墙规则; 删除脚本文件夹; "别点 PowerShell 窗口里面"。
+7. Windows 只有在 `flow listen` 返回 0 后才显示 READY (最多重试 3 次, 否则 FAILED)。
+8. M4b / W3b 提示改正: Windows 不会自动重新监听, 两边都要在重试关卡按回车。
+9. Mac `openlogi` CLI 调用加超时 (`HT_CLI_TIMEOUT`, 默认 30 秒, `perl alarm` + exec, bash 3.2 兼容)。UNVERIFIED: macOS 27 是否还带 `/usr/bin/perl` (没有则不加超时)。
+10. Windows: 恢复已存在目录时 robocopy 失败 → 备份移到 `%ProgramData%\OpenLogi-hwtest-KEPT-backup-*` 保留, 报 ERROR 和位置。
+11. Mac 预检 (`--artifact`) 挂载 dmg 检查 openlogi-desktop / openlogi-agent 的 codesign; 完全没签名 → 明确警告 (arm64 会杀掉); Run 安装后也检查。
+
+## 已知问题 (本轮不修)
+- 到达硬上限时可能重复执行恢复 (看门狗与主脚本; 恢复幂等, 有互斥)。
+- `launchctl setenv OPENLOGI_LOG` 的 launchd 域与读取/清除的域可能不一致。
+- `inject.sh` (默认关闭) 仍使用 osascript。
+- `open -g -j` 恢复 LogiPluginService 时窗口可能处于隐藏状态。
+- Windows 控制台 QuickEdit: 点击窗口会暂停输出 (RUNBOOK 已提示不要点)。

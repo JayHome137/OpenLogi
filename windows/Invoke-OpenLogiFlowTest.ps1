@@ -180,6 +180,9 @@ if ($Mode -eq 'Preflight') {
         $nm = [string](Get-Prop $p 'Name')
         if (-not (@(Get-AL 'optionsPlusProcesses') | Where-Object { [string](Get-Prop $_ 'name') -ieq $nm })) { Write-Host ('  {0,-28} pid {1,-6} {2}  [not in allowlist - never touched]' -f $nm, (Get-Prop $p 'Id'), (Get-ProcPath $p)) }
     }
+    $guiN = @(Get-OptionsPlusGuiProcesses).Count
+    if ($guiN -gt 0) { Write-Host ('  Options+ window (logioptionsplus) is OPEN ({0}) - close it before -Mode Run (the script never kills it).' -f $guiN) -ForegroundColor Yellow }
+    else { Write-Host '  Options+ window (logioptionsplus): not running - OK' }
     Write-Host ''
     Write-Host ('A real run (-Mode Run) WOULD: snapshot -> lease watchdog ({0} min lease, {1} min hard cap) -> stop allowlisted Options+ items -> extract OpenLogi to {2}' -f $LeaseMinutes, $HardCapMinutes, $C.PkgDir)
     Write-Host ('  -> firewall rules {0} -> agent in user session -> flow enable -> READY (UDP {1}) -> flow listen -> SAS gate -> layout edge={2} -> measurement gate -> restore -> diff' -f ((Get-HwTestFirewallRuleNames $C) -join ','), $Port, $FlowEdge)
@@ -208,6 +211,14 @@ if ($blocked.Count -gt 0) {
 if (-not $ArtifactZip -and -not $DownloadToken -and -not $DownloadTokenSecure -and -not $env:OPENLOGI_GH_TOKEN -and -not $env:GITHUB_TOKEN) {
     $DownloadTokenSecure = Read-Host -AsSecureString '粘贴 GitHub PAT 后回车 (输入不显示; 只用于下载 build artifact)'
     if (-not $DownloadTokenSecure -or $DownloadTokenSecure.Length -eq 0) { Show-Failed 'No PAT entered and no -ArtifactZip. Nothing was changed.'; exit 1 }
+}
+# GATE W0 (nothing changed yet): the Options+ WINDOW is never killed by the script (it would not be restarted).
+while (@(Get-OptionsPlusGuiProcesses).Count -gt 0) {
+    Write-Banner -Color 'Yellow' -Lines @('GATE W0 (Windows .9): 请先关掉 Options+ 窗口',
+        '在任务栏找到 Logi Options+ 窗口, 点右上角 X 关掉。(脚本不会替你关它。)',
+        '关掉后在这里按回车重新检查; 输入 abort 回车 = 退出 (什么都没改)。')
+    $ans = Read-Host '回车 = 重新检查 / abort'
+    if ($ans -and $ans.Trim() -ieq 'abort') { Write-Host 'Aborted at gate W0 - nothing was changed.' -ForegroundColor Yellow; exit 1 }
 }
 if ((Test-ScreenLocked) -and -not $AllowLockedSession) { Write-Host 'WARN: Console session appears LOCKED - the agent UI/hooks may not work.' -ForegroundColor Yellow }
 
@@ -319,19 +330,22 @@ try {
     $armListen = {
         $r = Invoke-Cli @('flow', 'listen')
         Write-R ('flow listen: code={0} out={1} err={2}' -f $r.Code, $r.Out.Trim(), $r.Err.Trim())
+        return ($r.Code -eq 0)
     }
     $attempt = 0
     while (-not $pairedName -and $PairRole -ne 'Skip') {
         $attempt++
         Update-Lease -Phase ('pairing-attempt-' + $attempt)
         if ($PairRole -eq 'Listen') {
-            & $armListen
+            $listenOk = $false
+            for ($li = 0; $li -lt 3 -and -not $listenOk; $li++) { $listenOk = [bool](& $armListen); if (-not $listenOk) { Start-Sleep -Seconds 3 } }
+            if (-not $listenOk -and -not $script:ReadyShown) { throw 'openlogi flow listen failed 3 times (non-zero exit) - not READY.' }
             if (-not $script:ReadyShown) {
                 $script:ReadyShown = $true
                 Write-R ('READY: listening on UDP {0}' -f $Port) 'GATE'
                 Write-Banner -Color 'Green' -Level 'GATE' -Lines @(
                     ('READY: listening on UDP {0}   (Windows / Jay-Alienware 192.168.1.9)' -f $Port),
-                    '>> 现在去 Mac mini (192.168.1.8) 启动 Mac 端脚本(RUNBOOK 第 5 步)。',
+                    '>> 现在去 Mac mini (192.168.1.8) 启动 Mac 端脚本(RUNBOOK 第 4 步)。',
                     '>> 本窗口会自动等 Mac 连进来, 不用按任何键。')
             }
             $waitCheck = {
@@ -339,11 +353,11 @@ try {
                 if ($s.Phase -eq 'Prompted') { return @{ Done = $true; Status = ('Mac 已连上, 配对码 ' + (Format-Sas $s.Sas)) } }
                 if ((Get-Count $s.Peers) -gt 0) { return @{ Done = $true; Status = 'already paired' } }
                 if ($s.Phase -eq 'Connecting') { return @{ Done = $false; Status = '正在监听, 等 Mac 发起配对 (每 120 秒自动续开监听窗口)' } }
-                & $armListen
+                [void](& $armListen)
                 return @{ Done = $false; Status = ('监听窗口已结束(' + $s.Phase + ' ' + $s.Failure + '), 已重新打开') }
             }
             $g = Wait-HumanGate -Title 'GATE W2 (Windows .9): 等待 Mac 发起配对' -Phase 'gate-wait-peer' -Check $waitCheck -AutoContinue -PollSec 3 -Lines @(
-                '在 Mac mini (.8) 上: 打开 "终端", 粘贴 RUNBOOK 第 5 步的命令并回车, 按提示做 Mac 的授权步骤。',
+                '在 Mac mini (.8) 上: 打开 "终端", 粘贴 RUNBOOK 第 4 步的命令并回车, 按提示做 Mac 的授权步骤。',
                 'Mac 端会自动连到 192.168.1.9:42424。连上后本窗口会自动显示 6 位配对码。',
                 '这一步通常 3-10 分钟(Mac 下载+安装+授权)。没有倒计时, 慢慢来。')
             if ($g -eq 'skip') { Write-R 'Pairing skipped by user.' 'WARN'; break }
@@ -387,7 +401,7 @@ try {
         if ($outcome -eq 'skip') { break }
         if ($outcome -eq 'failed') {
             [void](Wait-HumanGate -Title 'GATE W3b (Windows .9): 配对没有成功' -Phase 'gate-pair-retry' -Lines @(
-                    '回车 = 重新开始配对(Windows 重新监听; Mac 端也会自动重试连接)。',
+                    '回车 = 重新开始配对(Windows 重新监听), 然后在 Mac 窗口 (GATE M4b) 也按回车。',
                     'abort = 结束测试并自动恢复。'))
             continue
         }

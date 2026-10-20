@@ -457,6 +457,13 @@ function Get-OptionsPlusProcessInfo {
     }
     @($out | Sort-Object Id -Unique)
 }
+# Options+ window (GUI). NEVER stopped by the scripts (it would not be restarted); Jay closes it himself at gate W0.
+function Get-OptionsPlusGuiProcesses {
+    $g = Get-Prop $script:AL 'optionsPlusGui'
+    if (-not $g) { return @() }
+    $n = [string](Get-Prop $g 'name')
+    @(@(Get-Process -Name $n -ErrorAction SilentlyContinue) | Where-Object { [string](Get-Prop $_ 'Name') -ieq $n })
+}
 function Get-OptionsPlusTargetProcesses { @(Get-OptionsPlusProcessInfo | Where-Object { $_.Allowed }) }
 # OpenLogi processes by exact name; Allowed only if the path equals the allowlisted path under {PkgRoot}.
 function Get-OpenLogiProcessInfo {
@@ -978,7 +985,7 @@ function Remove-TestFirewallRules {
         $n = (@($l -split '\|'))[0]
         if (Test-InList $n $mine) { continue }
         if (@($preAny | Where-Object { (@($_ -split '\|'))[0] -eq $n }).Count -gt 0) { continue }
-        Add-RestoreResult ('firewall rule not created by script: ' + $l) 'LEFTOVER' 'not in allowlist - remove manually if unwanted (RUNBOOK)'
+        Add-RestoreResult ('firewall rule not created by script: ' + $l) 'LEFTOVER' 'not in allowlist - remove manually if unwanted (RUNBOOK 第 9 步)'
     }
 }
 function Restore-RegistryValues {
@@ -1036,9 +1043,15 @@ function Remove-TestFiles {
                 $src = (@(([string]$backup) -split '\|', 2))[1]
                 if (-not (Test-PathAllowed $d)) { Add-RestoreResult ('restore ' + $d) 'ERROR' 'not in allowlist'; continue }
                 Remove-Item -LiteralPath $d -Recurse -Force -ErrorAction SilentlyContinue
-                & robocopy.exe $src $d /E /COPY:DAT /DCOPY:T /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null
-                $rc = $LASTEXITCODE; $stt = 'ERROR'; if ($rc -lt 8) { $stt = 'OK' }
-                Add-RestoreResult ('restore pre-existing ' + $d) $stt ('robocopy exit ' + $rc)
+                $rc = 99
+                try { & robocopy.exe $src $d /E /COPY:DAT /DCOPY:T /R:1 /W:1 /NFL /NDL /NJH /NJS /NP | Out-Null; $rc = $LASTEXITCODE } catch { $rc = 99 }
+                if ($rc -lt 8) { Add-RestoreResult ('restore pre-existing ' + $d) 'OK' ('robocopy exit ' + $rc) }
+                else {
+                    # Restore failed: the backup is the ONLY copy of Jay's data -> move it OUT of the work dir (which is deleted later).
+                    $keep = Join-Path $env:ProgramData ('OpenLogi-hwtest-KEPT-backup-' + (Get-Date).ToString('yyyyMMdd-HHmmss') + '-' + (Split-Path -Leaf $src))
+                    try { Move-Item -LiteralPath $src -Destination $keep -ErrorAction Stop; $where = $keep } catch { $where = $src + ' (move failed: ' + $_.Exception.Message + ')' }
+                    Add-RestoreResult ('restore pre-existing ' + $d) 'ERROR' ('robocopy exit ' + $rc + ' - backup KEPT at ' + $where + ' (copy it back to ' + $d + ' by hand)')
+                }
             }
             elseif ($preVal -eq 'absent' -or $preVal -eq 'False') { Remove-PathSafe $d }
             elseif (-not $Pre -and (Test-Path -LiteralPath $d)) { Add-RestoreResult ('keep ' + $d) 'LEFTOVER' 'no snapshot: cannot tell whether it pre-existed' }

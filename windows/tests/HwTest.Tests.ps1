@@ -225,6 +225,7 @@ Describe 'Run-1 verified Options+ paths, unreadable paths' {
         @(Get-AL 'registryValuesRemoveIfAbsentBefore' | Where-Object { [string](Get-Prop $_ 'value') -eq 'Logitech Download Assistant' }).Count | Should -Be 0
         @((Get-Prop (Get-Prop $script:AL 'neverTouch') 'registryValues') | Where-Object { [string](Get-Prop $_ 'value') -eq 'Logitech Download Assistant' }).Count | Should -Be 1
         @(Get-AL 'scheduledTasksDisable').Count | Should -Be 0
+        @(Get-AL 'optionsPlusProcesses' | Where-Object { [string](Get-Prop $_ 'name') -eq 'logioptionsplus' }).Count | Should -Be 0   # Options+ window is never in the stop set
     }
 }
 

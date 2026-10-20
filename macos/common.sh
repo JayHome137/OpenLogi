@@ -203,6 +203,9 @@ state = {
   "guiWasRunning": e("HT_GUI_WAS_RUNNING", "0") == "1",
   "actions": {"labelsDisabled": jl("HT_ACT_DISABLED_JSON", "[]"), "backups": jl("HT_ACT_BACKUPS_JSON", "[]")},
 }
+# pre-test running state is only written once it was really observed (unknown -> restore leaves GUI/plugin alone)
+if e("HT_GUI_STATE_KNOWN", "0") != "1": state.pop("guiWasRunning")
+if e("HT_PLUGIN_STATE_KNOWN", "0") != "1": state.pop("pluginWasRunning")
 tmp = sys.argv[1] + ".tmp"
 with open(tmp, "w", encoding="utf-8") as f:
     json.dump(state, f, indent=2, ensure_ascii=False); f.write("\n")
@@ -236,6 +239,7 @@ kv = {
   "HT_PLUGIN_WAS_RUNNING": "1" if s.get("pluginWasRunning") else "0",
   "HT_GUI_WAS_RUNNING": "1" if s.get("guiWasRunning") else "0",
   "HT_GUI_STATE_KNOWN": "1" if "guiWasRunning" in s else "0",
+  "HT_PLUGIN_STATE_KNOWN": "1" if "pluginWasRunning" in s else "0",
   "HT_ACT_DISABLED_JSON": json.dumps(act.get("labelsDisabled", [])),
   "HT_ACT_BACKUPS_JSON": json.dumps(act.get("backups", [])),
   "HT_STATE_VERSION": int(s.get("version") or 1),
@@ -678,13 +682,20 @@ PY
 # paths, restore = `open -g -j` the exact bundle path. GUI (logioptionsplus): stop = SIGTERM to the exact
 # executable path; restore = back to its PRE-TEST state (running -> open -g; not running -> stays closed).
 # No osascript anywhere (avoids Automation/TCC prompts).
+# Record whether the Options+ GUI / LogiPluginService run BEFORE anything is changed. Must be called (and saved)
+# before restore-on-exit is armed: otherwise a failure before stop_options_plus (bad PAT, download error) would make
+# restore treat "unknown" as "was closed" and kill Jay's open Options+ window.
+record_optionsplus_prestate() {
+  HT_PLUGIN_WAS_RUNNING=0; logi_plugin_service_running && HT_PLUGIN_WAS_RUNNING=1
+  HT_GUI_WAS_RUNNING=0; gui_running && HT_GUI_WAS_RUNNING=1
+  HT_GUI_STATE_KNOWN=1; HT_PLUGIN_STATE_KNOWN=1
+  export HT_PLUGIN_WAS_RUNNING HT_GUI_WAS_RUNNING HT_GUI_STATE_KNOWN HT_PLUGIN_STATE_KNOWN
+  write_r INFO "pre-test: LogiPluginService running=$HT_PLUGIN_WAS_RUNNING, Options+ GUI running=$HT_GUI_WAS_RUNNING"
+}
 stop_options_plus() {
   section "STOP Options+ (allowlist only)"
   local d l p a
-  HT_PLUGIN_WAS_RUNNING=0; logi_plugin_service_running && HT_PLUGIN_WAS_RUNNING=1
-  HT_GUI_WAS_RUNNING=0; gui_running && HT_GUI_WAS_RUNNING=1
-  export HT_PLUGIN_WAS_RUNNING HT_GUI_WAS_RUNNING
-  write_r INFO "pre-stop: LogiPluginService running=$HT_PLUGIN_WAS_RUNNING, Options+ GUI running=$HT_GUI_WAS_RUNNING"
+  [[ "${HT_GUI_STATE_KNOWN:-0}" == 1 && "${HT_PLUGIN_STATE_KNOWN:-0}" == 1 ]] || record_optionsplus_prestate
   local stopped="[]"
   while IFS=$'\t' read -r d l p a; do
     if lctl_loaded "$d" "$l"; then
@@ -719,7 +730,7 @@ _open_bundle_as_user() {  # exact allowlisted bundle paths only
   as_user /usr/bin/open -g -j -a "$bp" 2>/dev/null || as_user /usr/bin/open -g -a "$bp" 2>/dev/null
 }
 restore_gui() {
-  if [[ "${HT_GUI_STATE_KNOWN:-1}" != 1 ]]; then rr WARN "Options+ GUI" "pre-test state unknown (run-1 state) - left as it is now"; return 0; fi
+  if [[ "${HT_GUI_STATE_KNOWN:-0}" != 1 ]]; then rr WARN "Options+ GUI" "pre-test state unknown - left as it is now"; return 0; fi
   local bp bid main i
   IFS=$'\t' read -r bp bid main <<<"$(gui_info)"
   sleep "${HT_GUI_SETTLE_SEC:-5}"
@@ -751,7 +762,9 @@ restore_options_plus() {
     if lctl_loaded "$d" "$l"; then rr OK "launchd $t" "bootstrapped"; else rr ERROR "launchd $t" "not loaded after bootstrap"; fi
   done
   sleep 3
-  if [[ "${HT_PLUGIN_WAS_RUNNING:-0}" == 1 ]]; then
+  if [[ "${HT_PLUGIN_STATE_KNOWN:-0}" != 1 ]]; then
+    rr WARN "LogiPluginService" "pre-test state unknown - left as it is now"
+  elif [[ "${HT_PLUGIN_WAS_RUNNING:-0}" == 1 ]]; then
     local pfx bp i
     IFS=$'\t' read -r pfx bp <<<"$(al_get rb-apps | head -1)"
     for i in 1 2 3 4 5; do logi_plugin_service_running && break; sleep 1; done
@@ -763,6 +776,46 @@ restore_options_plus() {
   fi
   restore_gui
   write_r INFO "Options+ processes now: $(proc_names_running | tr '\n' ' ')"
+}
+
+# artifact_to_dmg SRC WORKDIR -> prints the .dmg path. SRC = the browser-downloaded artifact .zip (zip wrapping the
+# .dmg, possibly nested), a .dmg, or a FOLDER (Safari auto-unzips downloads). Read-only on SRC.
+artifact_to_dmg() {
+  local src="$1" w="$2" d iz
+  case "$src" in
+    *.dmg) [[ -f "$src" ]] && { printf '%s\n' "$src"; return 0; } ;;
+  esac
+  if [[ -d "$src" ]]; then
+    d="$(find "$src" -name '*.dmg' -type f 2>/dev/null | head -1)"
+    if [[ -z "$d" ]]; then iz="$(find "$src" -name '*.zip' -type f 2>/dev/null | head -1)"; [[ -n "$iz" ]] && src="$iz"; fi
+    [[ -n "$d" ]] && { printf '%s\n' "$d"; return 0; }
+  fi
+  [[ -f "$src" ]] || return 1
+  mkdir -p "$w/unz"
+  unzip -o -q "$src" -d "$w/unz" || return 1
+  d="$(find "$w/unz" -name '*.dmg' -type f | head -1)"
+  if [[ -z "$d" ]]; then
+    iz="$(find "$w/unz" -name '*.zip' -type f | head -1)"
+    [[ -n "$iz" ]] || return 1
+    mkdir -p "$w/unz2"; unzip -o -q "$iz" -d "$w/unz2" || return 1
+    d="$(find "$w/unz2" -name '*.dmg' -type f | head -1)"
+  fi
+  [[ -n "$d" ]] || return 1
+  printf '%s\n' "$d"
+}
+# check_build_signature APP: arm64 macOS kills code that is not signed at all; ad-hoc is enough (run 1: Signature=adhoc).
+check_build_signature() {
+  local app="$1" b out bad=0
+  for b in "$app/Contents/MacOS/openlogi-desktop" "$app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent"; do
+    [[ -e "$b" ]] || { echo "  codesign: $(basename "$b") MISSING in build"; bad=1; continue; }
+    out="$(codesign -dv "$b" 2>&1 || true)"
+    if printf '%s' "$out" | grep -q -i 'not signed'; then
+      echo "  !!! codesign: $(basename "$b") is NOT signed (not even ad-hoc) - macOS on arm64 will KILL it. Do not run; tell GM."; bad=1
+    else
+      echo "  codesign: $(basename "$b") $(printf '%s\n' "$out" | grep -E '^(Signature=|Authority=)' | head -1)"
+    fi
+  done
+  return $bad
 }
 
 # ------------------------------------------------------------------ OpenLogi stop / files / TCC / env
@@ -818,10 +871,10 @@ reset_tcc_for_openlogi() {
   for s in $(al_get tcc-services); do
     for b in $(al_get tcc-bundles); do
       if tccutil reset "$s" "$b" >/dev/null 2>&1 || as_user tccutil reset "$s" "$b" >/dev/null 2>&1; then rr OK "tccutil reset $s $b"
-      else rr WARN "tccutil reset $s $b" "failed - remove manually (RUNBOOK leftovers)"; fi
+      else rr WARN "tccutil reset $s $b" "failed - remove manually (RUNBOOK 第 9 步)"; fi
     done
   done
-  rr LEFTOVER "Local Network (本地网络) entry for OpenLogi" "tccutil cannot reset it; see RUNBOOK leftovers"
+  rr LEFTOVER "Local Network (本地网络) entry for OpenLogi" "tccutil cannot reset it; see RUNBOOK 第 9 步"
 }
 restore_launchd_env() {
   local v pre cur prev
@@ -907,8 +960,8 @@ full_restore() {
   step "stop OpenLogi" stop_openlogi
   step "restore Options+" restore_options_plus
   step "launchd env" restore_launchd_env
+  step "TCC reset" reset_tcc_for_openlogi   # before the app is deleted
   step "files" remove_test_files
-  step "TCC reset" reset_tcc_for_openlogi
   export HT_COMPLETED=1
   [[ -d "$HT_WORK" ]] && { save_state || true; }
   if [[ -f "$HT_WORK/snapshot-pre.json" ]]; then
@@ -922,7 +975,7 @@ full_restore() {
   fi
   local fw
   fw="$("$HT_FIREWALL" --listapps 2>/dev/null | grep -i openlogi || true)"
-  [[ -n "$fw" ]] && rr LEFTOVER "macOS firewall app entry" "$(printf '%s' "$fw" | tr '\n' ' ') - see RUNBOOK leftovers"
+  [[ -n "$fw" ]] && rr LEFTOVER "macOS firewall app entry" "$(printf '%s' "$fw" | tr '\n' ' ') - see RUNBOOK 第 9 步"
   step "watchdog" uninstall_watchdog
   [[ -n "${HT_USER_WORK:-}" ]] && { rm_safe "$HT_USER_WORK" || true; }
   rm_safe "$HT_WORK" || true
@@ -935,11 +988,16 @@ full_restore() {
 
 # ------------------------------------------------------------------ OpenLogi CLI / Flow status
 # The CLI talks to the agent over ~/.config/openlogi/agent.sock -> must run AS THE USER with the user's HOME.
+# Every openlogi CLI call gets a timeout (HT_CLI_TIMEOUT, default 30 s). macOS has no GNU `timeout`: perl's alarm
+# survives exec, so the openlogi process ITSELF gets SIGALRM (exit 142) - no orphan keeps $(...) open.
+# No /usr/bin/perl -> runs without a timeout (UNVERIFIED that macOS 27 still ships perl).
 cli() {
+  local -a to=()
+  [[ -x /usr/bin/perl ]] && to=(/usr/bin/perl -e 'alarm shift; exec @ARGV or exit 127' "${HT_CLI_TIMEOUT:-30}")
   if is_root; then
-    launchctl asuser "$HT_TARGET_UID" /usr/bin/sudo -u "$HT_TARGET_USER" /usr/bin/env HOME="$HT_HOME" OPENLOGI_LOG="$HT_LOG_FILTER" "$HT_CLI" "$@"
+    launchctl asuser "$HT_TARGET_UID" /usr/bin/sudo -u "$HT_TARGET_USER" /usr/bin/env HOME="$HT_HOME" OPENLOGI_LOG="$HT_LOG_FILTER" ${to[@]+"${to[@]}"} "$HT_CLI" "$@"
   else
-    /usr/bin/env OPENLOGI_LOG="$HT_LOG_FILTER" "$HT_CLI" "$@"
+    /usr/bin/env OPENLOGI_LOG="$HT_LOG_FILTER" ${to[@]+"${to[@]}"} "$HT_CLI" "$@"
   fi
 }
 # parse_flow_status < JSON  -> "phase<TAB>sas<TAB>peer<TAB>localConfirmed<TAB>peerConfirmed<TAB>failure<TAB>nPeers<TAB>peer0"  (pure)

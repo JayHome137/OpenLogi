@@ -1,4 +1,4 @@
-### 2026-10-20 17:35:35 CST
+### 2026-10-20 17:55:40 CST
 ### cmd: /tmp/bash-3.2.57/bash macos/test-discovery.sh
 
 bash: 3.2.57(2)-release
@@ -37,7 +37,7 @@ PASS: GUI detected (exact main executable)
 PASS: LogiPluginService detected
 PASS: old 'pid command' ps format still parsed
 === kill guard (dry) ===
-2026-10-20T17:35:36+0800 [INFO] kill [test] 4242	logioptionsplus_agent	/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
+2026-10-20T17:55:40+0800 [INFO] kill [test] 4242	logioptionsplus_agent	/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
 PASS: kill allowlisted agent 4242
 PASS: refuse to kill pid 100
 PASS: refuse to kill pid 101
@@ -80,8 +80,8 @@ PASS: non-allowlisted path refused: /Applications/logioptionsplus.app
 PASS: non-allowlisted path refused: /Applications/OpenLogi.app/../logioptionsplus.app
 PASS: non-allowlisted path refused: /Applications/OpenLogi.app/
 PASS: non-allowlisted path refused: /Users/jayboy137/.config/openlogi2
-PASS: non-allowlisted path refused: /tmp/ol-hwtest-harness.ZuGPS3/fake
-PASS: rm_safe refuses /tmp/ol-hwtest-harness.ZuGPS3/fake
+PASS: non-allowlisted path refused: /tmp/ol-hwtest-harness.TEw7CS/fake
+PASS: rm_safe refuses /tmp/ol-hwtest-harness.TEw7CS/fake
 PASS: rm_safe really did not remove it
 PASS: dry rm log empty
 === open guard (dry) ===
@@ -110,6 +110,10 @@ PASS: dead pid -> not alive
 PASS: watchdog: no state -> exit 10
 PASS: watchdog: alive + lease valid -> wait (exit 0)
 PASS: watchdog: completed -> exit 10
+PASS: unobserved GUI/plugin state saved as unknown
+PASS: restore_gui with unknown state kills nothing
+PASS: control: known + was-closed -> GUI would be killed (fixture has GUI)
+PASS: record_optionsplus_prestate -> state known
 === state files (run-1 compatibility) ===
 PASS: run-1 deadline becomes hard cap
 PASS: run-1: GUI pre-state unknown (left alone)
@@ -140,6 +144,6 @@ PASS: abort exits 130 (EXIT trap restores)
 PASS: hard cap passed at a gate -> abort 130
 PASS: ABORT case-insensitive
 
-PASSED: 123   FAILED: 0
+PASSED: 127   FAILED: 0
 ALL HARNESS CHECKS PASSED
 ### exit=0

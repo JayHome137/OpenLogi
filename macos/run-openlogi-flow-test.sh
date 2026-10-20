@@ -108,7 +108,20 @@ if [[ "$MODE" == "preflight" ]]; then
     printf '%s\n' "$MISM" | sed 's/^/  MISMATCH /'
   fi
   echo
-  if [[ -n "$ARTIFACT" ]]; then echo "  artifact: $([[ -f $ARTIFACT ]] && echo "present: $ARTIFACT" || echo "MISSING: $ARTIFACT")"
+  if [[ -n "$ARTIFACT" ]]; then
+    if [[ -e "$ARTIFACT" ]]; then
+      echo "  artifact: present: $ARTIFACT"
+      PF_TMP="$(mktemp -d /tmp/ol-hwtest-pf.XXXXXX)"
+      if PF_DMG="$(artifact_to_dmg "$ARTIFACT" "$PF_TMP")" && [[ -n "$PF_DMG" ]]; then
+        echo "  dmg in artifact: $(basename "$PF_DMG")"
+        PF_MNT="$(hdiutil attach -nobrowse -readonly "$PF_DMG" 2>/dev/null | awk -F '\t' '/\/Volumes\//{print $NF; exit}')"
+        if [[ -n "$PF_MNT" ]]; then
+          check_build_signature "$PF_MNT/OpenLogi.app" || true
+          hdiutil detach "$PF_MNT" -quiet 2>/dev/null || hdiutil detach "$PF_MNT" -force 2>/dev/null || true
+        else echo "  !! could not mount the dmg (signature not checked)"; fi
+      else echo "  !! no .dmg found in $ARTIFACT"; fi
+      rm -rf "$PF_TMP"
+    else echo "  artifact: MISSING: $ARTIFACT"; fi
   else echo "  artifact: will download $( [[ "$(uname -m)" == x86_64 ]] && echo "$HT_ARTIFACT_X86" || echo "$HT_ARTIFACT_ARM64") from run $HT_RUN_ID (token asked with hidden input)"; fi
   echo
   echo "A real run (--mode run) WOULD: snapshot -> lease watchdog (${HT_LEASE_MIN} min lease, ${HT_HARDCAP_MIN} min hard cap)"
@@ -141,7 +154,7 @@ gate "GATE M0 (Mac .8): Windows 端准备好了吗?" "gate-m0" 5 0 "" "" -- \
   "看 Alienware (.9) 上的 PowerShell 窗口:" \
   "  显示绿色 'READY: listening on UDP 42424'  -> 在这里按回车继续。" \
   "  显示红色 FAILED                          -> 输入 abort 回车 (Mac 还什么都没改)。" \
-  "  还没启动 Windows 脚本                     -> 先去 Windows 启动(RUNBOOK 第 4 步), 等 READY 再回来按回车。"
+  "  还没启动 Windows 脚本                     -> 先去 Windows 启动(RUNBOOK 第 3 步), 等 READY 再回来按回车。"
 
 # ---- from here on things change: arm restore-on-exit
 HT_ARMED=0
@@ -172,6 +185,7 @@ cp -f "$DIR"/*.sh "$DIR"/inject.swift "$HT_WORK/suite/" 2>/dev/null || cp -f "$D
 cp -f "$HT_ALLOWLIST" "$HT_WORK/suite/allowlist.json"
 chmod 755 "$HT_WORK/suite"/*.sh
 HT_HARDCAP_MS=$(( $(now_ms) + HT_HARDCAP_MIN * 60000 )); export HT_HARDCAP_MS
+record_optionsplus_prestate   # BEFORE arming restore: unknown GUI/plugin state must never look like "was closed"
 save_state
 lease_renew start
 HT_ARMED=1
@@ -202,7 +216,7 @@ save_state
 section "ARTIFACT"
 resolve_artifact() {
   if [[ -n "$ARTIFACT" ]]; then
-    [[ -f "$ARTIFACT" ]] || { write_r ERROR "Artifact not found: $ARTIFACT"; return 1; }
+    [[ -f "$ARTIFACT" || -d "$ARTIFACT" ]] || { write_r ERROR "Artifact not found: $ARTIFACT"; return 1; }
     echo "$ARTIFACT"; return 0
   fi
   local tok="${TOKEN:-${OPENLOGI_GH_TOKEN:-${GITHUB_TOKEN:-}}}"
@@ -225,18 +239,8 @@ resolve_artifact() {
 }
 OUTER="$(resolve_artifact)"
 TOKEN=""; unset TOKEN OPENLOGI_GH_TOKEN GITHUB_TOKEN || true
-write_r INFO "Artifact: $OUTER sha256=$(shasum -a 256 "$OUTER" | awk '{print $1}')"
-DMG=""
-case "$OUTER" in
-  *.dmg) DMG="$OUTER" ;;
-  *.zip)
-    unzip -o -q "$OUTER" -d "$HT_WORK/dl/unz"
-    DMG="$(find "$HT_WORK/dl/unz" -name '*.dmg' | head -1)"
-    if [[ -z "$DMG" ]]; then
-      IZ="$(find "$HT_WORK/dl/unz" -name '*.zip' | head -1 || true)"
-      if [[ -n "$IZ" ]]; then unzip -o -q "$IZ" -d "$HT_WORK/dl/unz2"; DMG="$(find "$HT_WORK/dl/unz2" -name '*.dmg' | head -1)"; fi
-    fi ;;
-esac
+[[ -f "$OUTER" ]] && write_r INFO "Artifact: $OUTER sha256=$(shasum -a 256 "$OUTER" | awk '{print $1}')"
+DMG="$(artifact_to_dmg "$OUTER" "$HT_WORK/dl")" || true
 [[ -n "$DMG" && -f "$DMG" ]] || { write_r ERROR "No .dmg found in artifact"; exit 1; }
 write_r INFO "DMG: $DMG sha256=$(shasum -a 256 "$DMG" | awk '{print $1}')"
 lease_renew artifact-ready
@@ -258,6 +262,7 @@ else
 fi
 hdiutil detach "$MNT" -quiet || hdiutil detach "$MNT" -force || true
 codesign -dv "$HT_APP" 2>&1 | while IFS= read -r L; do write_r INFO "codesign: $L"; done || true
+check_build_signature "$HT_APP" | while IFS= read -r L; do write_r INFO "$L"; done || true
 lease_renew installed
 
 section "START OpenLogi (user session)"
@@ -387,7 +392,7 @@ while [[ -z "$PAIRED_NAME" && "$PAIR_ROLE" != skip ]]; do
   if [[ "$OUTCOME" == failed ]]; then
     cli flow cancel >/dev/null 2>&1 || true
     gate "GATE M4b (Mac .8): 配对没有成功" "gate-pair-retry" 5 0 "" "" -- \
-      "回车 = 重新发起配对 (Windows 会自动重新监听)。" "abort = 结束测试并自动恢复。"
+      "先在 Windows 窗口 (GATE W3b) 按回车, 让它重新监听;" "然后在这里按回车 = 重新发起配对。" "abort = 结束测试并自动恢复 (Windows 窗口也输入 abort)。"
   fi
 done
 if [[ -n "$PAIRED_NAME" ]]; then write_r GATE "PAIRED with peer name: $PAIRED_NAME"; else write_r WARN "No paired peer - crossings cannot happen."; fi

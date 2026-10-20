@@ -3,7 +3,8 @@
 #   bash macos/test-discovery.sh            /path/to/bash-3.2 macos/test-discovery.sh
 # Uses recorded/synthetic launchctl + ps dumps. Mutating helpers run in DRY mode (HT_DRY_*): they record what
 # they WOULD touch, so the tests prove that non-allowlisted items are never touched.
-# shellcheck disable=SC2317  # stub functions (date/ps/launchctl overrides) are invoked indirectly
+# shellcheck disable=SC2317,SC2030,SC2031  # stubs invoked indirectly; per-check subshells isolate env on purpose
+
 DIR="$(cd "$(dirname "$0")" && pwd)"
 TMPW="$(mktemp -d /tmp/ol-hwtest-harness.XXXXXX)"
 export HT_WORK="$TMPW/work"
@@ -154,6 +155,12 @@ lease_renew watchdog-test
 HT_WORK="$HT_WORK" "$BASH" "$DIR/watchdog.sh" --tick >/dev/null 2>&1; eq "watchdog: alive + lease valid -> wait (exit 0)" "$?" 0
 HT_COMPLETED=1 save_state
 HT_WORK="$HT_WORK" "$BASH" "$DIR/watchdog.sh" --tick >/dev/null 2>&1; eq "watchdog: completed -> exit 10" "$?" 10
+# fix: GUI/plugin pre-state not yet observed (failure before stop_options_plus) -> unknown -> GUI never killed
+( unset HT_GUI_STATE_KNOWN HT_PLUGIN_STATE_KNOWN HT_GUI_WAS_RUNNING HT_PLUGIN_WAS_RUNNING; save_state
+  eval "$(state_env_lines "$HT_WORK/state.json")"; [[ "$HT_GUI_STATE_KNOWN" == 0 && "$HT_PLUGIN_STATE_KNOWN" == 0 ]] ); eq "unobserved GUI/plugin state saved as unknown" "$?" 0
+( unset HT_GUI_STATE_KNOWN; export HT_DRY_KILL="$TMPW/kills-gui"; : >"$HT_DRY_KILL"; HT_GUI_SETTLE_SEC=0 restore_gui >/dev/null 2>&1; [[ ! -s "$HT_DRY_KILL" ]] ); eq "restore_gui with unknown state kills nothing" "$?" 0
+( export HT_GUI_STATE_KNOWN=1 HT_GUI_WAS_RUNNING=0 HT_DRY_KILL="$TMPW/kills-gui2"; : >"$HT_DRY_KILL"; HT_GUI_SETTLE_SEC=0 restore_gui >/dev/null 2>&1; [[ -s "$HT_DRY_KILL" ]] ); eq "control: known + was-closed -> GUI would be killed (fixture has GUI)" "$?" 0
+( record_optionsplus_prestate >/dev/null 2>&1; save_state; eval "$(state_env_lines "$HT_WORK/state.json")"; [[ "$HT_GUI_STATE_KNOWN" == 1 ]] ); eq "record_optionsplus_prestate -> state known" "$?" 0
 rm -f "$HT_WORK/state.json"
 
 echo "=== state files (run-1 compatibility) ==="

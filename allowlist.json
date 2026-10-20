@@ -77,15 +77,6 @@
         "source": "verified: run-1 pre-snapshot info.proc.logi.paths"
       },
       {
-        "name": "logioptionsplus",
-        "paths": [
-          "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus.exe"
-        ],
-        "restartInUserSession": false,
-        "unverified": true,
-        "note": "GUI; not running in run 1"
-      },
-      {
         "name": "LogiPluginService",
         "paths": [
           "C:\\Program Files\\Logi\\LogiPluginService\\LogiPluginService.exe"
@@ -158,6 +149,14 @@
         }
       ],
       "note": "documentation + test assertion only; mutations only iterate the lists above"
+    },
+    "optionsPlusGui": {
+      "name": "logioptionsplus",
+      "paths": [
+        "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus.exe"
+      ],
+      "actions": [],
+      "note": "Options+ window: NEVER stopped (would not be restarted). Run waits at gate W0 until Jay closes it himself."
     }
   },
   "macos": {

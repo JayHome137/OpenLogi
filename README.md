@@ -84,6 +84,7 @@ Pester (StrictMode Latest, mock 返回 0/1/多个对象); bash -n (bash 5 和 3.
   而停止 `OptionsPlusUpdaterService` 通常会让它们退出。路径**读得到但不在清单里** → 不动且拒绝开始 (预检退出码 4)。
 - 恢复 (run 1 已验证): 恢复服务启动类型并启动服务后, 所有 Options+ 进程会自己回来。脚本等 60 秒, 按名字核对测试前在跑的每个进程;
   只有 `logioptionsplus_agent` (以及 LogiPluginService, 如果有) 仍缺失时才在用户会话里启动; 每个名字记 OK / ERROR。
+- Windows 的 Options+ 窗口 (`logioptionsplus`) 从不被脚本结束 (它不会被自动重启); Run 在改动前的 GATE W0 等 Jay 自己关掉。
 - Windows 没有 Logitech 计划任务 (run 1 已验证); 不禁用任何计划任务。HKLM Run `Logitech Download Assistant` 永不碰。
 - Mac: 只 bootout/bootstrap 清单中的 launchd job, 从不 `launchctl disable/enable`, 不用 osascript; LogiPluginService 只按 bundle 路径 `open -g -j` 恢复;
   Options+ 界面测试前在跑才 `open -g`。Mac 注入探针默认关闭 (`--with-injection`)。
@@ -99,7 +100,7 @@ Pester (StrictMode Latest, mock 返回 0/1/多个对象); bash -n (bash 5 和 3.
 
 ## 不用 PAT 的方式
 浏览器打开 https://github.com/JayHome137/OpenLogi/actions/runs/39235760610 下载 `OpenLogi-windows-x86_64` / `OpenLogi-macos-dmg-arm64`,
-然后 `-ArtifactZip <路径>` / `--artifact <路径>`。PAT 在 Windows 用 `Read-Host -AsSecureString` (改动前询问), Mac 用 `read -s` 并经 stdin 交给 `curl -K -`。
+然后 `-ArtifactZip <路径>` / `--artifact <路径>`。**Mac 默认就用这种方式** (PAT 只显示一次, 两台机器没有共享剪贴板); `--artifact` 接受 zip、dmg 或 Safari 自动解压出的文件夹。PAT 在 Windows 用 `Read-Host -AsSecureString` (改动前询问), Mac 用 `read -s` 并经 stdin 交给 `curl -K -`。
 
 ## Windows PowerShell 5.1 只解析检查 (未运行, 需要 Jay 另外授权)
 见 `tools/PARSE-ONLY-windows.txt`。只解析, 不执行脚本代码, 不需要管理员:
