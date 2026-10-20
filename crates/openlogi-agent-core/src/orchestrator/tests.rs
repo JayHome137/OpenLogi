@@ -30,6 +30,8 @@ mod device_list;
 mod device_settings;
 mod light_changes;
 mod light_reload;
+mod lock_keys;
+mod low_battery;
 mod os_layout;
 mod publication;
 mod reapply;
@@ -57,6 +59,8 @@ fn dev(key: &str, slot: u8, online: bool) -> AgentDevice {
         light_capabilities: None,
         online,
         settings_revision: 0,
+        codename: None,
+        battery: None,
     }
 }
 

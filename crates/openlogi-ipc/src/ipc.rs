@@ -15,7 +15,9 @@ use std::time::Duration;
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{ActionRingIcon, ActionRingSlot};
 use openlogi_core::config::{ConfigRevision, Lighting};
-use openlogi_core::device::{ChangedOnLight, DeviceInventory, LightState, StandaloneDevice};
+use openlogi_core::device::{
+    BatteryInfo, ChangedOnLight, DeviceInventory, DeviceKind, LightState, LockKey, StandaloneDevice,
+};
 use openlogi_core::hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
     LightCommand, PairingError, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo,
@@ -112,12 +114,20 @@ pub use succession::Identity;
 ///      control's value, or the user chose that control. A file at another
 ///      revision loads as a plain reload. `Agent::observe_backlight`
 ///      appended — the level a keyboard's backlight keys set, for the
-///      overlay's transient indicator.
+///      overlay's transient indicator. `Agent::observe_notices`,
+///      [`NoticeObservation`], [`Notice`] and [`NoticeKind`] appended —
+///      the notices the overlay shows, first among them a device's low
+///      battery. `Agent::observe_lock_keys`, [`LockKeyObservation`] and
+///      [`LockKeyChange`] appended — the lock key a keyboard turned on or
+///      off over HID++ `0x4220`, for the overlay's transient indicator.
 /// v38: `AgentSnapshot::flow` appended — configured Flow peers, their
 ///      coarse connection state, and the Flow pairing ceremony; Flow
 ///      management RPCs (`flow_set_enabled`, `flow_pair_*`,
 ///      `flow_set_layout`) appended.
-pub const PROTOCOL_VERSION: u32 = 38;
+/// v39: Flow's RPCs re-appended after upstream v37's `observe_notices` and
+///      `observe_lock_keys`, which moves their request/response variant
+///      indices (fork-only; upstream is still at v37).
+pub const PROTOCOL_VERSION: u32 = 39;
 
 /// Environment variable through which the agent hands a supervised helper the
 /// run token it will serve, so the helper knows which agent it belongs to
@@ -649,6 +659,78 @@ pub struct BacklightObservation {
     pub visible: bool,
 }
 
+/// The transient lock-key indicator: the lock key a keyboard just turned on
+/// or off, or none once the indicator's time is up.
+///
+/// Its own cell, as [`BacklightObservation`] is. The agent owns how long the
+/// indicator shows.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockKeyObservation {
+    /// See [`Generation`]. Pass it back to the next [`Agent::observe_lock_keys`].
+    pub generation: Generation,
+    /// The change to show, or `None` for none — which is also how the
+    /// indicator ends.
+    pub shown: Option<LockKeyChange>,
+    /// Configured UI locale, or `None` to follow the overlay host's system
+    /// locale.
+    pub language: Option<String>,
+}
+
+/// A lock key that a keyboard reported turning on or off.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LockKeyChange {
+    /// The key that changed.
+    pub key: LockKey,
+    /// Whether the key is now on.
+    pub engaged: bool,
+}
+
+/// What a notice tells the user.
+///
+/// Variants are append-only because this enum crosses bincode IPC.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum NoticeKind {
+    /// A device's battery came to need attention
+    /// ([`BatteryInfo::needs_attention`]).
+    LowBattery {
+        /// What to call the device: the name the user gave it, else the name
+        /// it reports. `None` when it has neither, and the overlay names it
+        /// by its kind.
+        name: Option<String>,
+        /// The device's kind, for that fallback name.
+        kind: DeviceKind,
+        /// The reading that made the battery low.
+        battery: BatteryInfo,
+    },
+}
+
+/// One notice the overlay is showing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Notice {
+    /// Unique among the notices of one agent run, so a notice that is still
+    /// showing keeps its place while others come and go.
+    pub id: u64,
+    /// What the notice says.
+    pub kind: NoticeKind,
+}
+
+/// The notices the overlay should be showing, stamped with their generation.
+///
+/// Its own cell, as [`RingObservation`] is. The agent owns how long a notice
+/// shows: it posts the notice and removes it when its time is up, so an
+/// overlay that starts or reconnects shows only what is still current.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NoticeObservation {
+    /// See [`Generation`]. Pass it back to the next [`Agent::observe_notices`].
+    pub generation: Generation,
+    /// The notices to show, oldest first. Empty when there are none, which
+    /// is also how the last one ends.
+    pub notices: Vec<Notice>,
+    /// Configured UI locale, or `None` to follow the overlay host's system
+    /// locale.
+    pub language: Option<String>,
+}
+
 /// Why an Actions Ring interaction command was rejected.
 ///
 /// Variants are append-only because this enum crosses bincode IPC.
@@ -873,6 +955,17 @@ pub trait Agent {
     async fn reload_saved_config(saved: SavedConfig) -> Result<(), ConfigReloadError>;
     /// Block until the transient keyboard-backlight indicator changes.
     async fn observe_backlight(since: Generation) -> BacklightObservation;
+
+    /// Long-poll the notices the overlay should be showing. Answers as soon
+    /// as they differ from generation `since`, or with the unchanged notices
+    /// after [`OBSERVE_HOLD`]. Pass `0` to read the current notices at once.
+    async fn observe_notices(since: Generation) -> NoticeObservation;
+
+    /// Long-poll the lock-key indicator. Answers as soon as it differs from
+    /// generation `since`, or with the unchanged indicator after
+    /// [`OBSERVE_HOLD`]. Pass `0` to read the current indicator at once.
+    async fn observe_lock_keys(since: Generation) -> LockKeyObservation;
+
     /// Enable or disable the Flow runtime and persist the setting.
     async fn flow_set_enabled(enabled: bool) -> Result<(), ConfigReloadError>;
     /// Start a Flow peer pairing ceremony against a hostname or IP address.

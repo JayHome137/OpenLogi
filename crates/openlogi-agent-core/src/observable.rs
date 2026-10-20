@@ -13,6 +13,11 @@
 //! The cell has more than one writer — [`Orchestrator`](crate::orchestrator::Orchestrator)
 //! for the device and config facts, the agent binary for the hook ones — so it
 //! is shared as an `Arc` and every setter takes `&self`.
+//!
+//! The overlay's notices ride beside the snapshot in a cell of their own,
+//! [`NoticeBoard`]: a notice comes and goes without moving the GUI's
+//! generation. The lock-key indicator has its own cell for the same reason,
+//! [`LockKeyIndicator`].
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::brand::is_openlogi_foreground_id;
@@ -25,9 +30,14 @@ use openlogi_ipc::{
 };
 use tokio::sync::watch;
 
+use crate::lock_keys::LockKeyIndicator;
+use crate::notices::NoticeBoard;
+
 /// The agent's observable state, and the notification that it changed.
 pub struct ObservableState {
     tx: watch::Sender<Observation>,
+    notices: NoticeBoard,
+    lock_keys: LockKeyIndicator,
 }
 
 impl ObservableState {
@@ -65,7 +75,23 @@ impl ObservableState {
                 flow: FlowStatus::default(),
             },
         });
-        Self { tx }
+        Self {
+            tx,
+            notices: NoticeBoard::default(),
+            lock_keys: LockKeyIndicator::default(),
+        }
+    }
+
+    /// The notices the overlay shows.
+    #[must_use]
+    pub fn notices(&self) -> &NoticeBoard {
+        &self.notices
+    }
+
+    /// The lock-key indicator the overlay shows.
+    #[must_use]
+    pub fn lock_keys(&self) -> &LockKeyIndicator {
+        &self.lock_keys
     }
 
     /// Clone the whole current state.

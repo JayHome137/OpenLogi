@@ -38,7 +38,7 @@ use openlogi_core::config::{ConfigRevision, Lighting, ScrollResolution};
 use openlogi_core::device::{
     BatteryInfo, BatteryLevel, BatteryStatus, Capabilities, ChangedOnLight, DeviceInventory,
     DeviceKind, DeviceModelInfo, DeviceTransports, LightCapabilities, LightState, LightValueRange,
-    LightValueUnit, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
+    LightValueUnit, LockKey, PairedDevice, RawDeviceAddress, ReceiverInfo, StandaloneDevice,
 };
 use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightMode, BacklightState, BacklightStatus, Click,
@@ -51,9 +51,10 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind, ConfigReloadError,
-    FlowLinkState, FlowPeerStatus, FlowStatus, ForegroundApps, FoundDevice, Identity,
-    InventoryHealth, MonitorEvent, Observation, ObservedLight, PROTOCOL_VERSION,
-    PairingCommandError, PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
+    FlowEdge, FlowLayout, FlowLinkState, FlowPeerStatus, FlowStatus, ForegroundApps, FoundDevice,
+    Identity, InventoryHealth, LockKeyChange, LockKeyObservation, MonitorEvent, Notice, NoticeKind,
+    NoticeObservation, Observation, ObservedLight, PROTOCOL_VERSION, PairingCommandError,
+    PairingFailure, PairingPhase, PairingUpdate, RingObservation, SavedConfig,
 };
 use succession::{Compat, Run};
 
@@ -109,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 38);
+    assert_eq!(PROTOCOL_VERSION, 39);
 }
 
 #[test]
@@ -342,6 +343,95 @@ fn reload_saved_config() {
 #[test]
 fn observe_backlight() {
     assert_wire(&AgentRequest::ObserveBacklight { since: 7 }, "2507");
+}
+
+/// The overlay long-polls the notices by generation; a low-battery notice
+/// carries the device's name and kind and the reading that made it low.
+#[test]
+fn notices() {
+    assert_wire(&AgentRequest::ObserveNotices { since: 5 }, "2605");
+    assert_wire(
+        &NoticeObservation {
+            generation: 3,
+            notices: vec![Notice {
+                id: 2,
+                kind: NoticeKind::LowBattery {
+                    name: Some("MX".into()),
+                    kind: DeviceKind::Mouse,
+                    battery: BatteryInfo {
+                        percentage: Some(15),
+                        level: BatteryLevel::Low,
+                        status: BatteryStatus::Discharging,
+                    },
+                },
+            }],
+            language: Some("de".into()),
+        },
+        "0301020001024d5800010f010001026465",
+    );
+    assert_wire(
+        &NoticeObservation {
+            generation: 1,
+            notices: Vec::new(),
+            language: None,
+        },
+        "010000",
+    );
+}
+
+/// The overlay long-polls the lock-key indicator by generation; it carries
+/// the key that changed, whether it is now on, and the configured locale.
+#[test]
+fn lock_keys() {
+    assert_wire(&AgentRequest::ObserveLockKeys { since: 4 }, "2704");
+    assert_wire(
+        &LockKeyObservation {
+            generation: 2,
+            shown: Some(LockKeyChange {
+                key: LockKey::CapsLock,
+                engaged: true,
+            }),
+            language: Some("de".into()),
+        },
+        "0201010101026465",
+    );
+    assert_wire(
+        &LockKeyObservation {
+            generation: 3,
+            shown: Some(LockKeyChange {
+                key: LockKey::ScrollLock,
+                engaged: false,
+            }),
+            language: None,
+        },
+        "0301020000",
+    );
+}
+
+/// v39: Flow's management RPCs follow upstream's `observe_notices` and
+/// `observe_lock_keys`, so their request indices start at `0x28`.
+#[test]
+fn flow_requests() {
+    assert_wire(&AgentRequest::FlowSetEnabled { enabled: true }, "2801");
+    assert_wire(
+        &AgentRequest::FlowPairStart {
+            address: "mac".into(),
+        },
+        "29036d6163",
+    );
+    assert_wire(&AgentRequest::FlowPairListen {}, "2a");
+    assert_wire(&AgentRequest::FlowPairConfirm {}, "2b");
+    assert_wire(&AgentRequest::FlowPairReject {}, "2c");
+    assert_wire(&AgentRequest::FlowPairCancel {}, "2d");
+    assert_wire(
+        &AgentRequest::FlowSetLayout {
+            layout: vec![FlowLayout {
+                edge: FlowEdge::Right,
+                peer: "mac".into(),
+            }],
+        },
+        "2e0101036d6163",
+    );
 }
 
 /// A chord crosses the wire as its modifier bits and the key's HID usage.

@@ -72,6 +72,23 @@ optional physical device key.
   bindings that produce keystrokes or run workflows are skipped unless the
   hovered window is focused. Global actions such as desktop switching can run
   without changing application focus.
+- `low_battery_notifications` (default `true`): the agent shows a notice at the
+  bottom of the screen when a connected device's battery runs low. Low means
+  20% or less while the device is not charging, or a low or critical level from
+  a device that reports no percentage. Each discharge is announced once. The
+  device is announced again only after it charges, reads 30% or more, or
+  reports a good or full level. A notice closes after 8 seconds or when it is
+  clicked. With the setting off the agent posts no notice, but it still notes
+  when a device charges, so the next discharge is announced once the setting
+  is back on. A notice already on screen still closes on its own.
+- `lock_key_notifications` (default `true`): when a keyboard with the HID++
+  `LockKeyState` feature (`0x4220`) reports Caps Lock turning on or off, the
+  agent shows an indicator in the centre of the screen for 1.5 seconds. On
+  Windows and Linux it does the same for Num Lock and Scroll Lock. macOS gives
+  those two keys no meaning, so they show nothing there. A change replaces the
+  one on screen. The state a keyboard reports when it connects is not
+  announced. With the setting off the agent shows nothing, and an indicator
+  already on screen still closes on its own. Fn Lock is not shown.
 
 `[devices."<physical-key>"]` contains per-device state. Receiver keys look like
 `receiver:<receiver-id>:slot:<number>`; direct, raw-HID, and camera devices use
