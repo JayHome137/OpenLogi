@@ -1,58 +1,55 @@
 #!/usr/bin/env bash
-# Manual emergency restore. Run with sudo:
-#   sudo /path/to/emergency-restore.sh [--delete-openlogi-dirs]
-# Idempotent. Prefer this if the main test or watchdog left Options+ disabled.
-set -euo pipefail
+# Manual emergency restore (Mac Mini .8). Run in Terminal:
+#   sudo /bin/bash emergency-restore.sh [--delete-openlogi-dirs]
+# - With saved state (also a run-1 state): full restore to the pre-snapshot (same code as the watchdog).
+# - Without state: allowlist-only defaults: stop OpenLogi (exact paths), bootstrap the allowlisted Options+ jobs
+#   if not loaded, start LogiPluginService if absent, unset OPENLOGI_LOG (run-1 leftover), remove watchdog + work dir.
+#   OpenLogi.app / config dirs are only removed with --delete-openlogi-dirs. The Options+ GUI is left as it is.
+# Every item is attempted; failures are listed in the RESTORE SUMMARY. Idempotent.
+set -uo pipefail
 DIR="$(cd "$(dirname "$0")" && pwd)"
 DELETE_DIRS=0
 [[ "${1:-}" == "--delete-openlogi-dirs" ]] && DELETE_DIRS=1
-if [[ "$(id -u)" -ne 0 ]]; then
-  echo "Run with sudo." >&2
-  exit 2
-fi
-# Prefer installed suite copy.
-if [[ -f "/Library/Application Support/OpenLogi-hwtest/suite/common.sh" ]]; then
-  # shellcheck source=/dev/null
-  source "/Library/Application Support/OpenLogi-hwtest/suite/common.sh"
-else
-  # shellcheck source=/dev/null
-  source "$DIR/common.sh"
-fi
-export HT_COMMON="$DIR/common.sh"
+if [[ "$(id -u)" -ne 0 ]]; then echo "Run with sudo:  sudo /bin/bash $0" >&2; exit 2; fi
+# Always the code next to this file (NOT an older installed suite copy from run 1).
+# shellcheck source=common.sh
+source "$DIR/common.sh"
+set +e
+al_load || exit 2
 
 if [[ -f "$(state_path)" ]]; then
   load_state_env
-  write_r WARN "EMERGENCY RESTORE (manual) using saved state"
-  if [[ -n "${HT_MAIN_PID:-}" && "$HT_MAIN_PID" != "$$" ]] && kill -0 "$HT_MAIN_PID" 2>/dev/null; then
-    kill "$HT_MAIN_PID" 2>/dev/null || true
-  fi
-  full_restore "emergency"
-  exit 0
+  HT_USER_WORK="$HT_HOME/Library/Application Support/OpenLogi-hwtest"
+  write_r WARN "EMERGENCY RESTORE (manual) using saved state (format v${HT_STATE_VERSION:-1})"
+  if main_alive && [[ "$HT_MAIN_PID" != "$$" ]]; then kill -9 "$HT_MAIN_PID" 2>/dev/null && write_r WARN "Killed main test script pid $HT_MAIN_PID"; fi
+  if full_restore "emergency"; then exit 0; else exit 3; fi
 fi
 
-# No saved state: guide defaults.
 init_context "$(console_user)"
-write_r WARN "EMERGENCY RESTORE WITHOUT saved state - bootstrap known plists only (no enable/disable)"
-stop_openlogi || true
-# No saved state: bootstrap known plists only — do NOT launchctl enable/disable (preserve overrides).
-export HT_GUI_LABELS_JSON='["com.logi.cp-dev-mgr"]'
-export HT_SYS_LABELS_JSON='["com.logi.optionsplus.updater"]'
-export HT_GUI_JOBS_JSON='{"com.logi.cp-dev-mgr":"/Library/LaunchAgents/com.logi.optionsplus.plist"}'
-export HT_SYS_JOBS_JSON='{"com.logi.optionsplus.updater":"/Library/LaunchDaemons/com.logi.optionsplus.updater.plist"}'
-export HT_DISABLED_BEFORE_JSON='{}'
-export HT_ACT_DISABLED_JSON='["gui/'"$HT_TARGET_UID"'/com.logi.cp-dev-mgr","system/com.logi.optionsplus.updater"]'
-export HT_ACT_BACKUPS_JSON='[]'
-# No snapshot: unknown if LogiPluginService was running. Best-effort relaunch if absent
-# (idempotent). Whether cp-dev-mgr relaunches it after bootstrap is also UNKNOWN.
-export HT_PLUGIN_WAS_RUNNING=1
-restore_options_plus || true
-if [[ "$DELETE_DIRS" -eq 1 ]]; then
-  rm -rf "$HT_CONFIG_DIR" "$HT_STATE_DIR" "$HT_DATA_DIR" 2>/dev/null || true
-  [[ -d "$HT_APP" ]] && rm -rf "$HT_APP"
+HT_USER_WORK="$HT_HOME/Library/Application Support/OpenLogi-hwtest"
+write_r WARN "EMERGENCY RESTORE (manual) WITHOUT saved state - allowlist-only defaults"
+_mutex_take
+HT_RR_ERR=0; HT_RR_N=0; HT_RR_TEXT=""
+HT_ACT_DISABLED_JSON="$(al_get launchd-optionsplus | awk -F '\t' '{print $1 "/" $2}' | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
+export HT_ACT_DISABLED_JSON HT_PLUGIN_WAS_RUNNING=1 HT_GUI_STATE_KNOWN=0
+step "stop OpenLogi" stop_openlogi
+step "restore Options+" restore_options_plus
+for v in $(al_get env-unset); do
+  if [[ -n "$(as_user launchctl getenv "$v" 2>/dev/null)" ]]; then
+    launchctl asuser "$HT_TARGET_UID" launchctl unsetenv "$v"
+    if [[ -z "$(as_user launchctl getenv "$v" 2>/dev/null)" ]]; then rr OK "launchctl unsetenv $v"; else rr ERROR "launchctl unsetenv $v" "still set"; fi
+  fi
+done
+if [[ $DELETE_DIRS -eq 1 ]]; then
+  for d in "$HT_APP" "$HT_CONFIG_DIR" "$HT_STATE_DIR" "$HT_DATA_DIR"; do rm_safe "$d" || true; done
+  step "TCC reset" reset_tcc_for_openlogi
 else
-  write_r WARN "Left OpenLogi dirs/app in place (pass --delete-openlogi-dirs to remove)"
+  for d in "$HT_APP" "$HT_CONFIG_DIR" "$HT_STATE_DIR" "$HT_DATA_DIR"; do [[ -e "$d" ]] && rr LEFTOVER "keep $d" "use --delete-openlogi-dirs to remove"; done
 fi
-uninstall_watchdog || true
-rm -rf "$HT_WORK" 2>/dev/null || true
-write_r INFO "Emergency restore finished. Options+ allowlisted procs:"
-list_optionsplus_procs | while IFS= read -r line; do write_r INFO "  $line"; done
+step "watchdog" uninstall_watchdog
+rm_safe "$HT_USER_WORK" || true
+rm_safe "$HT_WORK" || true
+rc=0; rr_summary || rc=3
+write_r INFO "Options+ processes now: $(proc_names_running | tr '\n' ' ')"
+_mutex_drop
+exit $rc

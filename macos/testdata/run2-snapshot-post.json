@@ -1,0 +1,4 @@
+{"takenAt": "2026-10-20T11:00:00.000+08:00", "host": "Mac-mini", "items": {
+ "proc.optionsplus": {"value": "LogiPluginService=/Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginService\nlogioptionsplus_agent=/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent", "info": false},
+ "net.udp.listeners": {"value": "", "info": false}
+}}

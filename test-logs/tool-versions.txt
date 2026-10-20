@@ -1,0 +1,7 @@
+pwsh: 7.4.6
+PSScriptAnalyzer: 1.25.0
+Pester: 
+bash: 5.2.37(1)-release
+bash32: 3.2.57(2)-release
+shellcheck: version: 0.10.0
+python3: Python 3.13.5

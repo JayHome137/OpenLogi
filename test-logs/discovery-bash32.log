@@ -1,0 +1,145 @@
+### 2026-10-20 17:28:29 CST
+### cmd: /tmp/bash-3.2.57/bash macos/test-discovery.sh
+
+bash: 3.2.57(2)-release
+PASS: allowlist loads (single source: allowlist.json)
+PASS: missing allowlist fails closed
+=== launchctl discovery (info only) ===
+PASS: found com.logi.cp-dev-mgr
+PASS: found plugin service label
+PASS: no invented com.logi.optionsplus label
+PASS: found updater
+PASS: logivoice override read
+PASS: cp-dev-mgr override read
+=== label classification (exact allowlist) ===
+PASS: stop target cp-dev-mgr
+PASS: stop target updater
+PASS: plugin label is not a bootout target
+PASS: plugin label = RunningBoard app (only dynamic id)
+PASS: look-alike application.com.logi.pluginservicex is not the RB app
+PASS: never-touch RightSight
+PASS: RightSight not a stop target
+PASS: logivoice not a stop target
+PASS: manager.daemon not a stop target
+PASS: com.logi.optionsplus (plist filename) not a target
+PASS: prefix com.logi.* no longer matches (com.logi.other)
+=== processes: exact paths, own-process exclusion ===
+PASS: own pid 9000 excluded (main tree / watchdog)
+PASS: own pid 9001 excluded (main tree / watchdog)
+PASS: own pid 9002 excluded (main tree / watchdog)
+PASS: own pid 9100 excluded (main tree / watchdog)
+PASS: own pid 9101 excluded (main tree / watchdog)
+PASS: unrelated pid 9200 (vim notes-openlogi.txt) not 'own'
+PASS: Options+ procs = exactly the allowlisted paths
+PASS: OpenLogi procs = exact bundle paths only (no /tmp or dev build, no own scripts)
+PASS: path-mismatch precheck flags look-alike names
+PASS: GUI detected (exact main executable)
+PASS: LogiPluginService detected
+PASS: old 'pid command' ps format still parsed
+=== kill guard (dry) ===
+2026-10-20T17:28:30+0800 [INFO] kill [test] 4242	logioptionsplus_agent	/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
+PASS: kill allowlisted agent 4242
+PASS: refuse to kill pid 100
+PASS: refuse to kill pid 101
+PASS: refuse to kill pid 102
+PASS: refuse to kill pid 1
+PASS: refuse to kill pid 6100
+PASS: refuse to kill pid 6200
+PASS: refuse to kill pid 6300
+PASS: refuse to kill pid 6400
+PASS: refuse to kill pid 6001
+PASS: refuse to kill pid 7002
+PASS: refuse to kill pid 7003
+PASS: refuse to kill pid 9000
+PASS: refuse to kill pid 9100
+PASS: refuse to kill pid 9101
+PASS: refuse to kill pid 9200
+PASS: OpenLogi kill list refuses own watchdog 9101
+PASS: kill_allowlisted touches only allowlisted pids
+PASS: OpenLogi stop touches only 7000 7001
+=== launchctl guard (dry) ===
+PASS: bootout gui/502/com.logi.cp-dev-mgr allowed
+PASS: bootout system/com.logi.optionsplus.updater allowed
+PASS: bootout RightSight refused
+PASS: bootout logivoice refused
+PASS: bootout plugin RB job refused
+PASS: wrong domain refused (updater in gui)
+PASS: wrong uid refused (gui/501)
+PASS: kickstart updater not allowed (not in its actions)
+PASS: bootstrap OpenLogi agent service not allowed (bootout only)
+PASS: only the 2 allowed launchctl calls were made
+=== file removal guard (dry) ===
+PASS: allowlisted path accepted: /Applications/OpenLogi.app
+PASS: allowlisted path accepted: /Users/jayboy137/.config/openlogi
+PASS: allowlisted path accepted: /Users/jayboy137/.local/state/openlogi
+PASS: allowlisted path accepted: /Users/jayboy137/.config
+PASS: non-allowlisted path refused: /
+PASS: non-allowlisted path refused: /Users/jayboy137
+PASS: non-allowlisted path refused: /Users/jayboy137/Documents
+PASS: non-allowlisted path refused: /Applications/logioptionsplus.app
+PASS: non-allowlisted path refused: /Applications/OpenLogi.app/../logioptionsplus.app
+PASS: non-allowlisted path refused: /Applications/OpenLogi.app/
+PASS: non-allowlisted path refused: /Users/jayboy137/.config/openlogi2
+PASS: non-allowlisted path refused: /tmp/ol-hwtest-harness.NUzFHR/fake
+PASS: rm_safe refuses /tmp/ol-hwtest-harness.NUzFHR/fake
+PASS: rm_safe really did not remove it
+PASS: dry rm log empty
+=== open guard (dry) ===
+PASS: open LogiPluginService.app allowed
+PASS: open logioptionsplus.app allowed
+PASS: open Safari refused
+PASS: open log
+=== lease ===
+PASS: no state -> exit
+PASS: completed -> exit
+PASS: alive + valid lease -> wait
+PASS: main dead -> fire
+PASS: lease expired (main hung) -> fire
+PASS: hard cap beats a fresh lease
+PASS: no lease written yet -> fire
+PASS: renewal = now + 20 min
+PASS: renewal capped at hard cap
+PASS: lease file hard cap
+PASS: lease file ~20 min ahead
+PASS: blocking read pushes lease to hard cap
+PASS: lease_status text mentions hard cap
+PASS: main_alive for this shell
+PASS: PID reuse detected via start time
+PASS: dead pid -> not alive
+=== watchdog.sh (offline, non-firing paths) ===
+PASS: watchdog: no state -> exit 10
+PASS: watchdog: alive + lease valid -> wait (exit 0)
+PASS: watchdog: completed -> exit 10
+=== state files (run-1 compatibility) ===
+PASS: run-1 deadline becomes hard cap
+PASS: run-1: GUI pre-state unknown (left alone)
+PASS: run-1: config home derived
+PASS: run-1 stopped jobs carried over
+=== snapshot diff ===
+PASS: run-1 pre (PIDs) vs run-2 post (name=path) -> PASS
+PASS: old-only keys downgraded to info
+PASS: missing Options+ process -> FAIL
+=== flow status parsing ===
+PASS: Prompted
+PASS: Paired
+PASS: Failed
+PASS: None
+PASS: null pairing
+PASS: agent down (empty)
+PASS: fmt_sas
+=== human gates (scripted input; no countdowns) ===
+PASS: skip
+PASS: command y
+PASS: Enter + check ok -> done
+PASS: Enter + check failing keeps waiting, then skip
+PASS: unknown input ignored, then N
+PASS: auto-continue when check passes (no key needed)
+PASS: no input + failing check never auto-passes (guard stops test)
+PASS: Enter without check -> done
+PASS: abort exits 130 (EXIT trap restores)
+PASS: hard cap passed at a gate -> abort 130
+PASS: ABORT case-insensitive
+
+PASSED: 123   FAILED: 0
+ALL HARNESS CHECKS PASSED
+### exit=0

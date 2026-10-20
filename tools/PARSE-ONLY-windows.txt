@@ -1,0 +1,8 @@
+Parse-only check with the REAL Windows PowerShell 5.1 on Jay-Alienware (.9).
+NOT RUN. Needs Jay's separate authorization. It only parses the files (no script code is executed), needs no admin.
+
+Open "Windows PowerShell" (blue icon, NOT PowerShell 7), then paste:
+
+cd "$env:LOCALAPPDATA\Temp\ol-hwtest\windows"; powershell.exe -NoProfile -ExecutionPolicy Bypass -File ..\tools\Test-PsParse.ps1 HwTest.Common.ps1 Invoke-OpenLogiFlowTest.ps1 Watchdog.ps1 Emergency-Restore.ps1 UserSide.ps1
+
+Expected: "PSVersion=5.1.x Edition=Desktop", every file "errors=0", last line "TOTAL_ERRORS=0", exit code 0.

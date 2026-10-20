@@ -1,0 +1,283 @@
+{
+  "_comment": "Single source of truth for EVERYTHING the hwtest scripts may change. Loaded by windows/HwTest.Common.ps1 and macos/common.sh. Mutating actions use exact, case-insensitive (Windows) / exact case-sensitive (macOS) comparison against these entries only. Tokens in {braces} are resolved at runtime from the test context (see ALLOWLIST.md). Entries marked unverified=true were not confirmed on Jay's machines.",
+  "version": 2,
+  "windows": {
+    "services": [
+      {
+        "name": "OptionsPlusUpdaterService",
+        "actions": [
+          "set-starttype",
+          "stop",
+          "start"
+        ],
+        "unverified": false,
+        "note": "run 1 log: pre Automatic/Running"
+      }
+    ],
+    "scheduledTasksDisable": [],
+    "scheduledTasksRepairEnableOnly": [
+      {
+        "path": "\\Microsoft\\Windows\\PushToInstall\\LoginCheck",
+        "note": "Run 1 wrongly disabled it. Only re-enabled if a saved run-1 state records it as disabled by the test. Never disabled."
+      }
+    ],
+    "ownScheduledTasks": [
+      "\\OpenLogiHwTest-Watchdog",
+      "\\OpenLogiHwTest-User-StartAgent",
+      "\\OpenLogiHwTest-User-Inject",
+      "\\OpenLogiHwTest-User-Restore-logioptionsplus_agent",
+      "\\OpenLogiHwTest-User-Restore-LogiPluginService"
+    ],
+    "optionsPlusProcesses": [
+      {
+        "name": "logioptionsplus_agent",
+        "paths": [
+          "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus_agent.exe"
+        ],
+        "restartInUserSession": true,
+        "unverified": true
+      },
+      {
+        "name": "logioptionsplus",
+        "paths": [
+          "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus.exe"
+        ],
+        "restartInUserSession": false,
+        "unverified": true
+      },
+      {
+        "name": "logioptionsplus_updater",
+        "paths": [
+          "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus_updater.exe"
+        ],
+        "restartInUserSession": false,
+        "unverified": true
+      },
+      {
+        "name": "logioptionsplus_appbroker",
+        "paths": [
+          "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus_appbroker.exe"
+        ],
+        "restartInUserSession": false,
+        "unverified": true
+      },
+      {
+        "name": "logi_crashpad_handler",
+        "paths": [
+          "C:\\Program Files\\LogiOptionsPlus\\logi_crashpad_handler.exe"
+        ],
+        "restartInUserSession": false,
+        "unverified": true
+      },
+      {
+        "name": "LogiPluginService",
+        "paths": [
+          "C:\\Program Files\\Logi\\LogiPluginService\\LogiPluginService.exe"
+        ],
+        "restartInUserSession": true,
+        "unverified": true
+      }
+    ],
+    "openLogiProcesses": [
+      {
+        "name": "openlogi-agent",
+        "path": "{PkgRoot}\\openlogi-agent.exe"
+      },
+      {
+        "name": "OpenLogi",
+        "path": "{PkgRoot}\\OpenLogi.exe"
+      },
+      {
+        "name": "openlogi-overlay",
+        "path": "{PkgRoot}\\openlogi-overlay.exe"
+      },
+      {
+        "name": "openlogi",
+        "path": "{PkgRoot}\\bin\\openlogi.exe"
+      }
+    ],
+    "firewallRules": [
+      "OpenLogiHwTest-UDP-{Port}",
+      "OpenLogiHwTest-mDNS-5353"
+    ],
+    "registryValuesRemoveIfAbsentBefore": [
+      {
+        "key": "HKEY_USERS\\{Sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Run",
+        "value": "OpenLogiAgent"
+      },
+      {
+        "key": "HKEY_USERS\\{Sid}\\Software\\Microsoft\\Windows\\CurrentVersion\\Explorer\\StartupApproved\\Run",
+        "value": "OpenLogiAgent",
+        "unverified": true
+      }
+    ],
+    "pathsRemoveIfAbsentBefore": [
+      "{WorkRoot}",
+      "{Profile}\\OpenLogi-hwtest-pkg",
+      "{ConfigHome}\\openlogi",
+      "{StateHome}\\openlogi",
+      "{DataHome}\\openlogi",
+      "{ConfigHome}\\openlogi-dev",
+      "{Profile}\\AppData\\Roaming\\OpenLogi",
+      "{Profile}\\AppData\\Local\\OpenLogi",
+      "{Profile}\\AppData\\Local\\org.openlogi.openlogi",
+      "{Profile}\\AppData\\Local\\Programs\\OpenLogi"
+    ],
+    "pathsRemoveIfCreatedAndEmpty": [
+      "{ConfigHome}",
+      "{StateHome}",
+      "{DataHome}",
+      "{Profile}\\.local"
+    ],
+    "pathsWriteOnly": [
+      "{Profile}\\OpenLogi-test-result.log"
+    ]
+  },
+  "macos": {
+    "launchdJobs": [
+      {
+        "domain": "gui/{uid}",
+        "label": "com.logi.cp-dev-mgr",
+        "plist": "/Library/LaunchAgents/com.logi.optionsplus.plist",
+        "actions": [
+          "bootout",
+          "bootstrap",
+          "kickstart"
+        ],
+        "role": "optionsplus"
+      },
+      {
+        "domain": "system",
+        "label": "com.logi.optionsplus.updater",
+        "plist": "/Library/LaunchDaemons/com.logi.optionsplus.updater.plist",
+        "actions": [
+          "bootout",
+          "bootstrap"
+        ],
+        "role": "optionsplus"
+      },
+      {
+        "domain": "gui/{uid}",
+        "label": "org.openlogi.agent.service",
+        "plist": "",
+        "actions": [
+          "bootout"
+        ],
+        "note": "OpenLogi agent login item (test subject)",
+        "unverified": true,
+        "role": "openlogi"
+      },
+      {
+        "domain": "system",
+        "label": "com.openlogi.hwtest.watchdog",
+        "plist": "/Library/LaunchDaemons/com.openlogi.hwtest.watchdog.plist",
+        "actions": [
+          "bootstrap",
+          "bootout",
+          "create-plist",
+          "delete-plist"
+        ],
+        "note": "own watchdog",
+        "role": "own"
+      }
+    ],
+    "neverTouchLabels": [
+      "com.logitech.LogiRightSight.Agent",
+      "com.logi.optionsplus.logivoice",
+      "com.logitech.manager.daemon"
+    ],
+    "runningBoardApps": [
+      {
+        "labelPrefix": "application.com.logi.pluginservice.",
+        "bundlePath": "/Applications/Utilities/LogiPluginService.app",
+        "note": "ONLY dynamic id. Never bootout. Identified by exact executable path; restored with open -g -j <bundlePath>."
+      }
+    ],
+    "optionsPlusProcesses": [
+      {
+        "name": "logioptionsplus_agent",
+        "path": "/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent"
+      },
+      {
+        "name": "logioptionsplus_updater",
+        "path": "/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/Frameworks/logioptionsplus_updater.app/Contents/MacOS/logioptionsplus_updater"
+      },
+      {
+        "name": "LogiPluginService",
+        "path": "/Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginService"
+      },
+      {
+        "name": "LogiPluginServiceNative",
+        "path": "/Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginServiceNative"
+      },
+      {
+        "name": "LogiPluginServiceExt",
+        "path": "/Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginServiceExt"
+      },
+      {
+        "name": "logioptionsplus",
+        "path": "/Applications/logioptionsplus.app/Contents/MacOS/logioptionsplus"
+      }
+    ],
+    "optionsPlusGui": {
+      "bundlePath": "/Applications/logioptionsplus.app",
+      "bundleIdFallback": "com.logi.optionsplus",
+      "mainExecutable": "/Applications/logioptionsplus.app/Contents/MacOS/logioptionsplus",
+      "unverifiedBundleId": true
+    },
+    "openLogiProcesses": [
+      {
+        "name": "openlogi-desktop",
+        "path": "/Applications/OpenLogi.app/Contents/MacOS/openlogi-desktop"
+      },
+      {
+        "name": "openlogi",
+        "path": "/Applications/OpenLogi.app/Contents/MacOS/openlogi"
+      },
+      {
+        "name": "openlogi-agent",
+        "path": "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent"
+      },
+      {
+        "name": "openlogi-overlay",
+        "path": "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay"
+      }
+    ],
+    "tccReset": {
+      "services": [
+        "Accessibility",
+        "ListenEvent"
+      ],
+      "bundleIds": [
+        "org.openlogi.openlogi",
+        "org.openlogi.agent",
+        "org.openlogi.overlay"
+      ]
+    },
+    "launchdUserEnvUnsetIfAbsentBefore": [
+      "OPENLOGI_LOG"
+    ],
+    "pathsRemoveIfAbsentBefore": [
+      "/Applications/OpenLogi.app",
+      "/Library/Application Support/OpenLogi-hwtest",
+      "{home}/Library/Application Support/OpenLogi-hwtest",
+      "{ConfigHome}/openlogi",
+      "{StateHome}/openlogi",
+      "{DataHome}/openlogi",
+      "{ConfigHome}/openlogi-dev",
+      "{home}/Library/Application Support/OpenLogi",
+      "{home}/Library/Caches/org.openlogi.openlogi",
+      "{home}/Library/Preferences/org.openlogi.openlogi.plist",
+      "/tmp/OpenLogiHwTestRestore.lock"
+    ],
+    "pathsRemoveIfCreatedAndEmpty": [
+      "{ConfigHome}",
+      "{StateHome}",
+      "{DataHome}",
+      "{home}/.local"
+    ],
+    "pathsWriteOnly": [
+      "{home}/OpenLogi-test-result.log"
+    ]
+  }
+}

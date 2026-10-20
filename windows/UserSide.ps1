@@ -1,4 +1,4 @@
-# Runs INSIDE the target user's interactive session (launched by a temporary
+﻿# Runs INSIDE the target user's interactive session (launched by a temporary
 # "Interactive" scheduled task from HwTest.Common.ps1 / Invoke-UserTask). Non-elevated.
 #   -Action StartAgent   : start openlogi-agent.exe with OPENLOGI_LOG set (so hooks/tray live on the real desktop)
 #   -Action StartProcess : start an arbitrary exe (used by the Options+ restore)

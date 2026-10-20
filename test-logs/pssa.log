@@ -1,0 +1,35 @@
+### 2026-10-20 17:27:56 CST
+### cmd: pwsh -NoProfile -c 
+Import-Module PSScriptAnalyzer
+$r = @(Invoke-ScriptAnalyzer -Path ./windows -Settings ./windows/tests/PSScriptAnalyzerSettings.psd1)
+$r | Sort-Object ScriptName, Line | Format-Table -AutoSize -Wrap Severity, RuleName, ScriptName, Line, Message | Out-String -Width 220
+$compat = @($r | Where-Object { $_.RuleName -like "PSUseCompatible*" }); $err = @($r | Where-Object { [string]$_.Severity -eq "Error" })
+"TOTAL={0} compat={1} errors={2}" -f $r.Count, $compat.Count, $err.Count
+exit ([int](($compat.Count + $err.Count) -gt 0))
+
+
+Severity RuleName                    ScriptName                  Line Message
+-------- --------                    ----------                  ---- -------
+ Warning PSAvoidUsingEmptyCatchBlock Emergency-Restore.ps1         32 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1            116 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1            212 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1            340 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1            416 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1            545 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1            577 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1            639 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSReviewUnusedParameter     HwTest.Common.ps1            783 The parameter 'Pre' has been declared but not used.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1            813 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1           1062 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1           1082 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1           1097 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock HwTest.Common.ps1           1167 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock Invoke-OpenLogiFlowTest.ps1   58 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock Invoke-OpenLogiFlowTest.ps1   92 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSReviewUnusedParameter     UserSide.ps1                  11 The parameter 'OutFile' has been declared but not used.
+ Warning PSAvoidUsingEmptyCatchBlock UserSide.ps1                  32 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+ Warning PSAvoidUsingEmptyCatchBlock Watchdog.ps1                   9 Empty catch block is used. Please use Write-Error or throw statements in catch blocks.
+
+
+TOTAL=19 compat=0 errors=0
+### exit=0

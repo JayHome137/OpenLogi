@@ -1,0 +1,15 @@
+### 2026-10-20 17:27:56 CST
+### cmd: python3 -c 
+import json,glob,sys
+for f in ["allowlist.json"]+glob.glob("macos/testdata/*.json"):
+    json.load(open(f,encoding="utf-8")); print("ok", f)
+
+ok allowlist.json
+ok macos/testdata/flow-paired.json
+ok macos/testdata/run2-snapshot-post.json
+ok macos/testdata/flow-none.json
+ok macos/testdata/run1-snapshot-pre.json
+ok macos/testdata/run1-state.json
+ok macos/testdata/flow-failed.json
+ok macos/testdata/flow-prompted.json
+### exit=0

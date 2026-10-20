@@ -1,0 +1,11 @@
+### 2026-10-20 17:28:15 CST
+### cmd: bash -c rc=0; for f in macos/common.sh macos/run-openlogi-flow-test.sh macos/watchdog.sh macos/emergency-restore.sh macos/inject.sh macos/test-discovery.sh tools/run-offline-tests.sh; do bash -n "$f" && echo "ok $f" || rc=1; done; exit $rc
+
+ok macos/common.sh
+ok macos/run-openlogi-flow-test.sh
+ok macos/watchdog.sh
+ok macos/emergency-restore.sh
+ok macos/inject.sh
+ok macos/test-discovery.sh
+ok tools/run-offline-tests.sh
+### exit=0

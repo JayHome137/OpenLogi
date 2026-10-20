@@ -9,7 +9,7 @@ ARGS=()
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --out) OUT="$2"; shift 2 ;;
-    --edge) EDGE="$2"; ARGS+=(--edge "$2"); shift 2 ;;
+    --edge) EDGE="$2"; shift 2 ;;
     *) ARGS+=("$1"); shift ;;
   esac
 done
@@ -24,7 +24,8 @@ if [[ ! -x "$BIN" || "$DIR/inject.swift" -nt "$BIN" ]]; then
 fi
 # Run as the console user so Accessibility grants for that user apply.
 UID_CONSOLE="$(stat -f%u /dev/console)"
-RESULT="$(launchctl asuser "$UID_CONSOLE" "$BIN" --edge "$EDGE" "${ARGS[@]:-}" 2>/dev/null || true)"
+# bash 3.2 + set -u: never expand an empty array directly
+RESULT="$(launchctl asuser "$UID_CONSOLE" "$BIN" --edge "$EDGE" ${ARGS[@]+"${ARGS[@]}"} 2>/dev/null || true)"
 if [[ -z "$RESULT" ]]; then
   # Fallback: osascript System Events (also needs Accessibility; less precise).
   RESULT="$(launchctl asuser "$UID_CONSOLE" /usr/bin/osascript <<'OSA' 2>/dev/null || true

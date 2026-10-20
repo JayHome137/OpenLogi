@@ -1,0 +1,19 @@
+{
+  "targetUser": "jayboy137",
+  "targetUid": "502",
+  "home": "/Users/jayboy137",
+  "resultLog": "/Users/jayboy137/OpenLogi-test-result.log",
+  "configDir": "/Users/jayboy137/.config/openlogi",
+  "stateDir": "/Users/jayboy137/.local/state/openlogi",
+  "dataDir": "/Users/jayboy137/.local/share/openlogi",
+  "parentDirs": ["/Users/jayboy137/.config", "/Users/jayboy137/.local", "/Users/jayboy137/.local/state", "/Users/jayboy137/.local/share"],
+  "extraDirs": [],
+  "appExisted": false,
+  "mainPid": 4321,
+  "startedMs": 1792400000000,
+  "deadlineMs": 1792400900000,
+  "completed": false,
+  "port": 42424,
+  "pluginWasRunning": true,
+  "actions": {"labelsDisabled": ["gui/502/com.logi.cp-dev-mgr", "system/com.logi.optionsplus.updater"], "backups": []}
+}

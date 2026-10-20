@@ -1,0 +1,25 @@
+    1     0 /sbin/launchd
+  100     1 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console
+  101     1 /usr/libexec/logind
+  102     1 /Library/Application
+ 4242     1 /Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
+  777     1 /Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/Frameworks/logioptionsplus_updater.app/Contents/MacOS/logioptionsplus_updater
+ 5555     1 /Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginService
+ 5556  5555 /Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginServiceNative --type=native
+ 5557  5555 /Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginServiceExt
+ 6000     1 /Applications/logioptionsplus.app/Contents/MacOS/logioptionsplus
+ 6001  6000 /Applications/logioptionsplus.app/Contents/Frameworks/logioptionsplus Helper (Renderer).app/Contents/MacOS/logioptionsplus Helper (Renderer) --type=renderer
+ 6100     1 /Applications/logioptionsplus.app/Contents/MacOS/logioptionsplus_helper
+ 6200     1 /Users/jayboy137/Downloads/logioptionsplus_agent
+ 6300     1 /Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent_old
+ 6400     1 /Applications/Utilities/LogiRightSight.app/Contents/MacOS/LogiRightSight
+ 7000     1 /Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent
+ 7001     1 /Applications/OpenLogi.app/Contents/MacOS/openlogi-desktop
+ 7002     1 /tmp/openlogi-agent
+ 7003     1 /Users/jayboy137/src/OpenLogi/target/release/openlogi-agent
+ 9000   899 /bin/bash /Users/jayboy137/OpenLogi-hwtest/run-openlogi-flow-test.sh --mode run
+ 9001  9000 /usr/bin/python3 - 9000
+ 9002  9000 sleep 2
+ 9100     1 /bin/bash -c while sleep 30; do /bin/bash "$0" --tick; [ "$?" -eq 10 ] && exit 0; done /Library/Application Support/OpenLogi-hwtest/suite/watchdog.sh
+ 9101  9100 /bin/bash /Library/Application Support/OpenLogi-hwtest/suite/watchdog.sh --tick
+ 9200     1 /usr/bin/vim /Users/jayboy137/notes-openlogi.txt
