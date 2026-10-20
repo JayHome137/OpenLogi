@@ -175,6 +175,95 @@ Describe 'Stop-OptionsPlus touches only allowlisted items' {
     }
 }
 
+Describe 'Run-1 verified Options+ paths, unreadable paths' {
+    BeforeEach {
+        $script:Ctx = New-TestCtx
+        Mock Save-State { }
+        Mock Stop-Process { }
+        $script:P = 'C:\Program Files\LogiOptionsPlus\'
+    }
+    It 'all run-1 observed paths are allowlisted (incl. both crashpad paths and logivoice)' {
+        Mock Get-CimInstance { $null }
+        Mock Get-Process { @((New-FakeProc 'logi_crashpad_handler' 11 ($script:P + 'logi_crashpad_handler.exe')), (New-FakeProc 'logi_crashpad_handler' 12 ($script:P + 'logivoice\logi_crashpad_handler.exe'))) } -ParameterFilter { $Name -eq 'logi_crashpad_handler' }
+        Mock Get-Process { New-FakeProc 'logioptionsplus_logivoice' 13 ($script:P + 'logivoice\logioptionsplus_logivoice.exe') } -ParameterFilter { $Name -eq 'logioptionsplus_logivoice' }
+        Mock Get-Process { New-FakeProc 'logioptionsplus_appbroker' 14 ($script:P + 'logioptionsplus_appbroker.exe') } -ParameterFilter { $Name -eq 'logioptionsplus_appbroker' }
+        Mock Get-Process { New-FakeProc 'logioptionsplus_updater' 15 ($script:P + 'logioptionsplus_updater.exe') } -ParameterFilter { $Name -eq 'logioptionsplus_updater' }
+        Mock Get-Process { $null } -ParameterFilter { $Name -notin @('logi_crashpad_handler', 'logioptionsplus_logivoice', 'logioptionsplus_appbroker', 'logioptionsplus_updater') }
+        $i = @(Get-OptionsPlusProcessInfo)
+        $i.Count | Should -Be 5
+        @($i | Where-Object { -not $_.Allowed }).Count | Should -Be 0
+    }
+    It 'unreadable path: NOT killed, NOT a mismatch (does not block the run)' {
+        Mock Get-CimInstance { $null }
+        Mock Get-Process { New-FakeProc 'logioptionsplus_appbroker' 21 '' } -ParameterFilter { $Name -eq 'logioptionsplus_appbroker' }
+        Mock Get-Process { $null } -ParameterFilter { $Name -ne 'logioptionsplus_appbroker' }
+        $i = @(Get-OptionsPlusProcessInfo)
+        $i[0].Unreadable | Should -BeTrue
+        $i[0].Mismatch | Should -BeFalse
+        $i[0].Allowed | Should -BeFalse
+        Stop-OptionsPlusProcesses 'initial' | Should -Be 0
+        Should -Invoke Stop-Process -Times 0 -Exactly
+    }
+    It 'empty Process.Path falls back to CIM ExecutablePath (then exact match applies)' {
+        Mock Get-CimInstance { [pscustomobject]@{ ExecutablePath = 'C:\Program Files\LogiOptionsPlus\logioptionsplus_updater.exe'; ParentProcessId = 4 } }
+        Mock Get-Process { New-FakeProc 'logioptionsplus_updater' 22 '' } -ParameterFilter { $Name -eq 'logioptionsplus_updater' }
+        Mock Get-Process { $null } -ParameterFilter { $Name -ne 'logioptionsplus_updater' }
+        $i = @(Get-OptionsPlusProcessInfo)
+        $i[0].Allowed | Should -BeTrue
+        [void](Stop-OptionsPlusProcesses 'initial')
+        Should -Invoke Stop-Process -Times 1 -Exactly -ParameterFilter { $Id -eq 22 }
+    }
+    It 'readable but wrong path is a Mismatch and is never killed' {
+        Mock Get-CimInstance { $null }
+        Mock Get-Process { New-FakeProc 'logioptionsplus_appbroker' 23 'C:\Temp\logioptionsplus_appbroker.exe' } -ParameterFilter { $Name -eq 'logioptionsplus_appbroker' }
+        Mock Get-Process { $null } -ParameterFilter { $Name -ne 'logioptionsplus_appbroker' }
+        (@(Get-OptionsPlusProcessInfo))[0].Mismatch | Should -BeTrue
+        [void](Stop-OptionsPlusProcesses 'initial')
+        Should -Invoke Stop-Process -Times 0 -Exactly
+    }
+    It 'HKLM Run "Logitech Download Assistant" is never-touch and not in any mutation list' {
+        @(Get-AL 'registryValuesRemoveIfAbsentBefore' | Where-Object { [string](Get-Prop $_ 'value') -eq 'Logitech Download Assistant' }).Count | Should -Be 0
+        @((Get-Prop (Get-Prop $script:AL 'neverTouch') 'registryValues') | Where-Object { [string](Get-Prop $_ 'value') -eq 'Logitech Download Assistant' }).Count | Should -Be 1
+        @(Get-AL 'scheduledTasksDisable').Count | Should -Be 0
+    }
+}
+
+Describe 'Restore-OptionsPlus: service start brings processes back, verified by name' {
+    BeforeEach {
+        $script:Ctx = New-TestCtx
+        Reset-RestoreResults
+        Mock Save-State { }
+        Mock Get-CimInstance { $null }
+        Mock Get-Service { $null }
+        $script:FakeNow = [datetime]'2026-10-20T10:00:00'
+        Mock Get-Date { $script:FakeNow }
+        Mock Start-Sleep { $script:FakeNow = $script:FakeNow.AddSeconds(10) }
+        Mock Invoke-UserTask { }
+        Mock Get-ConsoleUser { 'JAY-ALIENWARE\jay' }
+        Mock Test-Path { $false }
+        Mock Test-Path { $true } -ParameterFilter { [string]$LiteralPath -like 'C:\Program Files\*' }
+        $P = 'C:\Program Files\LogiOptionsPlus\'
+        # run-1 shaped pre-snapshot (appbroker/updater/one crashpad had empty paths to a non-admin reader)
+        $v = (@(('logi_crashpad_handler=' + $P + 'logi_crashpad_handler.exe'), 'logi_crashpad_handler=', ('logioptionsplus_agent=' + $P + 'logioptionsplus_agent.exe'),
+                'logioptionsplus_appbroker=', ('logioptionsplus_logivoice=' + $P + 'logivoice\logioptionsplus_logivoice.exe'), 'logioptionsplus_updater=')) -join "`n"
+        $script:Pre = [ordered]@{ 'info.proc.logi.paths' = [pscustomobject]@{ value = $v; info = $true } }
+    }
+    It 'all back after the service start -> OK for every name, no user-session restart' {
+        Mock Get-Process { New-FakeProc $Name 1 '' }
+        Restore-OptionsPlus $script:Pre
+        @($script:RestoreResults | Where-Object { $_.Item -like 'process *' -and $_.Status -eq 'OK' }).Count | Should -Be 5
+        Should -Invoke Invoke-UserTask -Times 0 -Exactly
+    }
+    It 'agent missing -> restarted in the user session; appbroker missing -> ERROR (no restart, not restartInUserSession)' {
+        Mock Get-Process { $null } -ParameterFilter { $Name -in @('logioptionsplus_agent', 'logioptionsplus_appbroker') }
+        Mock Get-Process { New-FakeProc $Name 1 '' } -ParameterFilter { $Name -notin @('logioptionsplus_agent', 'logioptionsplus_appbroker') }
+        Restore-OptionsPlus $script:Pre
+        Should -Invoke Invoke-UserTask -Times 1 -Exactly -ParameterFilter { $Name -eq 'Restore-logioptionsplus_agent' }
+        @($script:RestoreResults | Where-Object { $_.Item -eq 'process logioptionsplus_appbroker' -and $_.Status -eq 'ERROR' }).Count | Should -Be 1
+        @($script:RestoreResults | Where-Object { $_.Item -eq 'process logioptionsplus_updater' -and $_.Status -eq 'OK' }).Count | Should -Be 1
+    }
+}
+
 Describe 'Restore is best-effort per item' {
     BeforeEach {
         $script:Ctx = New-TestCtx

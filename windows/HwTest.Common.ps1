@@ -424,12 +424,25 @@ function Get-LogiServices {
             ([string](Get-Prop $_ 'Name') -match 'logi|OptionsPlus' -or [string](Get-Prop $_ 'DisplayName') -match 'logi') -and [string](Get-Prop $_ 'Name') -notmatch 'openlogi'
         } | Sort-Object Name)
 }
-function Get-ProcPath($P) { try { return [string](Get-Prop $P 'Path') } catch { return '' } }
+# Path of a process. Some Options+ processes show an EMPTY Path to a non-elevated reader (run 1: appbroker, updater,
+# one crashpad), so fall back to CIM Win32_Process.ExecutablePath. '' = still unreadable (see Get-OptionsPlusProcessInfo).
+function Get-ProcPath($P) {
+    $path = ''
+    try { $path = [string](Get-Prop $P 'Path') } catch { $path = '' }
+    if (-not $path) {
+        try { $path = [string](Get-Prop (Get-CimInstance Win32_Process -Filter ('ProcessId={0}' -f [int](Get-Prop $P 'Id')) -ErrorAction Stop | Select-Object -First 1) 'ExecutablePath') } catch { $path = '' }
+    }
+    return $path
+}
 function Get-LogiProcesses {
     # read-only report
     @(Get-Process -ErrorAction SilentlyContinue | Where-Object { [string](Get-Prop $_ 'Name') -match 'logi' -and [string](Get-Prop $_ 'Name') -notmatch 'openlogi' })
 }
-# Options+ processes by EXACT allowlisted name. Each result has .Allowed = exact path match.
+# Options+ processes by EXACT allowlisted name.
+#   .Allowed    = path readable AND exactly in the allowlist  -> may be stopped
+#   .Unreadable = path could not be read (even via CIM)       -> NEVER stopped, does not block the run (logged as WARN);
+#                 stopping OptionsPlusUpdaterService normally ends these, and restore checks they come back by name.
+#   .Mismatch   = path readable but NOT in the allowlist      -> never stopped AND the run refuses to start.
 function Get-OptionsPlusProcessInfo {
     $out = @()
     foreach ($e in (Get-AL 'optionsPlusProcesses')) {
@@ -438,7 +451,8 @@ function Get-OptionsPlusProcessInfo {
         foreach ($p in @(Get-Process -Name $name -ErrorAction SilentlyContinue)) {
             if ([string](Get-Prop $p 'Name') -ine $name) { continue }   # defensive: no wildcard semantics
             $path = Get-ProcPath $p
-            $out += [pscustomobject]@{ Id = [int](Get-Prop $p 'Id'); Name = $name; Path = $path; Allowed = [bool]($path -and (Test-InList $path $paths)) }
+            $allowed = [bool]($path -and (Test-InList $path $paths))
+            $out += [pscustomobject]@{ Id = [int](Get-Prop $p 'Id'); Name = $name; Path = $path; Allowed = $allowed; Unreadable = (-not $path); Mismatch = [bool]($path -and -not $allowed) }
         }
     }
     @($out | Sort-Object Id -Unique)
@@ -808,6 +822,7 @@ function Stop-OptionsPlus {
 function Stop-OptionsPlusProcesses([string]$Why) {
     $n = 0
     foreach ($p in @(Get-OptionsPlusProcessInfo)) {
+        if ($p.Unreadable) { Write-R ("NOT killing {0} pid={1}: executable path unreadable (left running; the service stop normally ends it)" -f $p.Name, $p.Id) 'WARN'; continue }
         if (-not $p.Allowed) { Write-R ("NOT killing {0} pid={1}: path '{2}' is not in allowlist.json" -f $p.Name, $p.Id, $p.Path) 'WARN'; continue }
         $parent = '?'
         try { $pp = Get-Prop (Get-CimInstance Win32_Process -Filter ("ProcessId={0}" -f $p.Id) | Select-Object -First 1) 'ParentProcessId'; $parent = '{0}({1})' -f (Get-Process -Id $pp -ErrorAction Stop).Name, $pp } catch {}
@@ -874,39 +889,42 @@ function Restore-OptionsPlus {
         }
         catch { Add-RestoreResult ('task re-enable ' + $full) 'ERROR' $_.Exception.Message }
     }
-    # Background processes that were running before: wait for the service to bring them back, else start them as the user.
+    # Run 1 (verified): starting OptionsPlusUpdaterService brings back ALL Options+ processes by itself. So: wait up to 60 s
+    # for every allowlisted NAME that ran before; only if still missing AND restartInUserSession AND its pre path is
+    # allowlisted, start it in the user session; then report each name OK / ERROR.
     try {
         $preProcs = @(Get-SnapLines $Pre 'proc.optionsplus')
         if ($preProcs.Count -eq 0) { $preProcs = @(Get-SnapLines $Pre 'info.proc.logi.paths') }   # run-1 snapshot key
-        $need = @()
-        foreach ($e in (Get-AL 'optionsPlusProcesses')) {
-            if (-not (Get-Prop $e 'restartInUserSession')) { continue }
-            $nm = [string](Get-Prop $e 'name')
-            foreach ($l in $preProcs) {
-                $kv = @(([string]$l) -split '=', 2)
-                if ($kv.Count -eq 2 -and $kv[0] -ieq $nm -and (Test-InList $kv[1] @(Get-Prop $e 'paths'))) { $need += [pscustomobject]@{ Name = $nm; Path = $kv[1] } }
-            }
+        $alNames = @(Get-AL 'optionsPlusProcesses' | ForEach-Object { [string](Get-Prop $_ 'name') })
+        $needNames = @()
+        foreach ($l in $preProcs) {
+            $nm = (@(([string]$l) -split '=', 2))[0]
+            if ((Test-InList $nm $alNames) -and -not (Test-InList $nm $needNames)) { $needNames += $nm }
         }
-        if ($need.Count -gt 0) {
-            $end = (Get-Date).AddSeconds(45)
+        if ($needNames.Count -gt 0) {
+            $isBack = { param($n) (Get-Count (Get-Process -Name $n -ErrorAction SilentlyContinue)) -gt 0 }
+            $end = (Get-Date).AddSeconds(60)
             while ((Get-Date) -lt $end) {
-                $missing = @($need | Where-Object { (Get-Count (Get-Process -Name $_.Name -ErrorAction SilentlyContinue)) -eq 0 })
-                if ($missing.Count -eq 0) { break }
+                if (@($needNames | Where-Object { -not (& $isBack $_) }).Count -eq 0) { break }
                 Start-Sleep -Seconds 3
             }
-            foreach ($m in @($need | Where-Object { (Get-Count (Get-Process -Name $_.Name -ErrorAction SilentlyContinue)) -eq 0 })) {
+            foreach ($nm in $needNames) {
                 try {
-                    if ((Test-Path -LiteralPath $m.Path) -and $script:Ctx.TargetUser -and (Get-ConsoleUser)) {
-                        Write-R ("{0} not back after 45s - starting it in the user session: {1}" -f $m.Name, $m.Path) 'WARN'
-                        $helper = Join-Path ([string]$script:Ctx.SuiteDir) 'UserSide.ps1'
-                        if (-not (Test-Path -LiteralPath $helper)) { $helper = Join-Path $PSScriptRoot 'UserSide.ps1' }
-                        [void](Invoke-UserTask -Name ('Restore-' + $m.Name) -ScriptPath $helper -Arguments @('-Action', 'StartProcess', '-Exe', $m.Path) -Wait -TimeoutSec 30)
-                        Start-Sleep -Seconds 3
+                    if (-not (& $isBack $nm)) {
+                        $e = @(Get-AL 'optionsPlusProcesses' | Where-Object { [string](Get-Prop $_ 'name') -ieq $nm }) | Select-Object -First 1
+                        $prePath = ''
+                        foreach ($l in $preProcs) { $kv = @(([string]$l) -split '=', 2); if ($kv.Count -eq 2 -and $kv[0] -ieq $nm -and $kv[1]) { $prePath = $kv[1]; break } }
+                        if ($e -and (Get-Prop $e 'restartInUserSession') -and $prePath -and (Test-InList $prePath @(Get-Prop $e 'paths')) -and (Test-Path -LiteralPath $prePath) -and $script:Ctx.TargetUser -and (Get-ConsoleUser)) {
+                            Write-R ("{0} not back 60 s after the service start - starting it in the user session: {1}" -f $nm, $prePath) 'WARN'
+                            $helper = Join-Path ([string]$script:Ctx.SuiteDir) 'UserSide.ps1'
+                            if (-not (Test-Path -LiteralPath $helper)) { $helper = Join-Path $PSScriptRoot 'UserSide.ps1' }
+                            [void](Invoke-UserTask -Name ('Restore-' + $nm) -ScriptPath $helper -Arguments @('-Action', 'StartProcess', '-Exe', $prePath) -Wait -TimeoutSec 30)
+                            Start-Sleep -Seconds 3
+                        }
                     }
-                    $back = (Get-Count (Get-Process -Name $m.Name -ErrorAction SilentlyContinue)) -gt 0
-                    if ($back) { Add-RestoreResult ('process ' + $m.Name) 'OK' 'running again' } else { Add-RestoreResult ('process ' + $m.Name) 'ERROR' 'was running before, not running now' }
+                    if (& $isBack $nm) { Add-RestoreResult ('process ' + $nm) 'OK' 'running again' } else { Add-RestoreResult ('process ' + $nm) 'ERROR' 'was running before, not running now' }
                 }
-                catch { Add-RestoreResult ('process ' + $m.Name) 'ERROR' $_.Exception.Message }
+                catch { Add-RestoreResult ('process ' + $nm) 'ERROR' $_.Exception.Message }
             }
         }
     }

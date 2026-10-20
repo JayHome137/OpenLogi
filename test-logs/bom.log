@@ -1,4 +1,4 @@
-### 2026-10-20 17:27:56 CST
+### 2026-10-20 17:35:05 CST
 ### cmd: bash -c rc=0; for f in windows/HwTest.Common.ps1 windows/Invoke-OpenLogiFlowTest.ps1 windows/Watchdog.ps1 windows/Emergency-Restore.ps1 windows/UserSide.ps1 windows/tests/HwTest.Tests.ps1 tools/Test-PsParse.ps1; do if head -c3 "$f" | od -An -tx1 | grep -q "ef bb bf"; then echo "BOM  $f"; else echo "NO-BOM $f"; rc=1; fi; done; exit $rc
 
 BOM  windows/HwTest.Common.ps1

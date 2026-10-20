@@ -18,12 +18,13 @@
 ## Windows (.9)
 | 类别 | 精确对象 | 允许的动作 |
 |---|---|---|
-| 服务 | `OptionsPlusUpdaterService` | 改启动类型 / 停止 / 恢复原启动类型并启动 |
-| 计划任务 (禁用) | **无** (没有已知的 Logitech 任务) | — |
-| 计划任务 (仅修复) | `\Microsoft\Windows\PushToInstall\LoginCheck` | 只**启用**: run-1 state 记录为测试禁用, 或手动 `-RepairLoginCheck`。**永不禁用** |
+| 服务 | `OptionsPlusUpdaterService` (ImagePath `"C:\Program Files\LogiOptionsPlus\logioptionsplus_updater.exe" --run-as-service`, 测试前 Automatic/Running, 已核实) | 改启动类型 / 停止 / 恢复原启动类型并启动 |
+| 计划任务 (禁用) | **无** (run 1 核实: Windows 没有 Logitech 计划任务) | — |
+| 永不碰 | HKLM `...\CurrentVersion\Run` : `Logitech Download Assistant` | — |
+| 计划任务 (仅修复) | `\Microsoft\Windows\PushToInstall\LoginCheck` | 只**启用**: run-1 state 记录为测试禁用, 或手动 `-RepairLoginCheck` (当前已是 Ready, 不需要)。**永不禁用** |
 | 硬性禁止 | 任何 `\Microsoft\` 下的任务 | 除上面这一项修复外绝不改动 |
 | 自己的任务 | `\OpenLogiHwTest-Watchdog`, `\OpenLogiHwTest-User-StartAgent`, `\OpenLogiHwTest-User-Inject`, `\OpenLogiHwTest-User-Restore-logioptionsplus_agent`, `\OpenLogiHwTest-User-Restore-LogiPluginService` | 创建 / 删除 |
-| Options+ 进程 | `logioptionsplus_agent`, `logioptionsplus`, `logioptionsplus_updater`, `logioptionsplus_appbroker`, `logi_crashpad_handler` (都在 `C:\Program Files\LogiOptionsPlus\`), `LogiPluginService` (`C:\Program Files\Logi\LogiPluginService\`) — **路径未验证** | 停止; `logioptionsplus_agent` 和 `LogiPluginService` 测试前在跑才在用户会话里重启 |
+| Options+ 进程 | **已核实 (run-1 预快照)**: `C:\Program Files\LogiOptionsPlus\` 下 `logioptionsplus_agent.exe`, `logioptionsplus_appbroker.exe`, `logioptionsplus_updater.exe`, `logi_crashpad_handler.exe`, `logivoice\logioptionsplus_logivoice.exe`, `logivoice\logi_crashpad_handler.exe`。**未见过**: `logioptionsplus.exe` (界面), `C:\Program Files\Logi\LogiPluginService\LogiPluginService.exe` | 停止 (路径读不到 → 不停止, 不阻止测试); 恢复靠启动服务, 按名字核对; `logioptionsplus_agent` / `LogiPluginService` 仍缺时在用户会话里启动 |
 | OpenLogi 进程 | `{PkgRoot}\openlogi-agent.exe`, `OpenLogi.exe`, `openlogi-overlay.exe`, `bin\openlogi.exe` | 停止 |
 | 防火墙规则 | `OpenLogiHwTest-UDP-{Port}`, `OpenLogiHwTest-mDNS-5353` (组 `OpenLogi-HwTest`) | 创建 / 删除 (按 Name 精确) |
 | 注册表值 (测试前不存在才删) | `HKU\{Sid}\...\CurrentVersion\Run` : `OpenLogiAgent`; `HKU\{Sid}\...\Explorer\StartupApproved\Run` : `OpenLogiAgent` (未验证) | 删除 |

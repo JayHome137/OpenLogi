@@ -141,12 +141,17 @@ if ($Mode -eq 'Preflight') {
         $n = [string](Get-Prop $e 'name')
         $svc = Get-Service -Name $n -ErrorAction SilentlyContinue | Select-Object -First 1
         if ($svc) { $report["service:$n"] = '{0} / {1}' -f (Get-Prop $svc 'Status'), (Get-ServiceStartType $n) } else { $report["service:$n"] = 'ABSENT' }
+        $wantImg = [string](Get-Prop $e 'imagePath')
+        if ($svc -and $wantImg) {
+            $img = ''; try { $img = [string](Get-Prop (Get-ItemProperty -LiteralPath ('HKLM:\SYSTEM\CurrentControlSet\Services\' + $n) -Name ImagePath -ErrorAction Stop) 'ImagePath') } catch { $img = '' }
+            $report["service:$n ImagePath"] = $img + $(if ($img -ieq $wantImg) { '  [matches allowlist]' } else { '  [DIFFERS from allowlist - info only, send to GM]' })
+        }
     }
     foreach ($e in (Get-AL 'scheduledTasksRepairEnableOnly')) {
         $full = [string](Get-Prop $e 'path'); $i = $full.LastIndexOf('\')
         $t = Get-ScheduledTask -TaskPath $full.Substring(0, $i + 1) -TaskName $full.Substring($i + 1) -ErrorAction SilentlyContinue | Select-Object -First 1
         $s = 'Absent'; if ($t) { $s = [string](Get-Prop $t 'State') }
-        $report["task:$full"] = $s + $(if ($s -eq 'Disabled') { '  <-- run-1 damage? if it was enabled before run 1: Emergency-Restore.ps1 -RepairLoginCheck (RUNBOOK step 2)' } else { '' })
+        $report["task:$full"] = $s + $(if ($s -eq 'Disabled') { '  <-- unexpected (was Ready before run 1): see README, Emergency-Restore.ps1 -RepairLoginCheck' } else { '' })
     }
     $report['logiScheduledTaskCandidates'] = (@(Get-LogiTasks | ForEach-Object { '{0} [{1}]' -f (Get-TaskFullPath $_), $(if (Test-TaskDisableAllowed (Get-TaskFullPath $_)) { 'allowlisted' } else { 'NOT in allowlist -> not touched' }) }) -join '; ')
     $report['logiServices(info)'] = (@(Get-LogiServices | ForEach-Object { Get-Prop $_ 'Name' }) -join ', ')
@@ -166,7 +171,9 @@ if ($Mode -eq 'Preflight') {
     Write-Host '==== Options+ processes vs allowlist.json (exact name + exact path) ===='
     $bad = 0
     foreach ($p in @(Get-OptionsPlusProcessInfo)) {
-        $tag = 'OK (allowlisted)'; if (-not $p.Allowed) { $tag = 'PATH NOT IN ALLOWLIST -> a run would STOP before touching anything'; $bad++ }
+        $tag = 'OK (allowlisted)'
+        if ($p.Unreadable) { $tag = 'PATH UNREADABLE -> will NOT be stopped (does not block the run)' }
+        elseif ($p.Mismatch) { $tag = 'PATH NOT IN ALLOWLIST -> a run would STOP before touching anything'; $bad++ }
         Write-Host ('  {0,-28} pid {1,-6} {2}  [{3}]' -f $p.Name, $p.Id, $p.Path, $tag)
     }
     foreach ($p in @(Get-LogiProcesses)) {
@@ -190,7 +197,9 @@ if (Test-Path -LiteralPath $C.StatePath) {
     Show-Failed ('Leftover state from an earlier run: {0}. Run Emergency-Restore.ps1 first (it repairs run-1 leftovers), then start again.' -f $C.StatePath)
     exit 1
 }
-$blocked = @(Get-OptionsPlusProcessInfo | Where-Object { -not $_.Allowed })
+$opInfo = @(Get-OptionsPlusProcessInfo)
+foreach ($u in @($opInfo | Where-Object { $_.Unreadable })) { Write-Host ('WARN: {0} pid {1}: executable path unreadable even elevated - it will NOT be stopped (the service stop normally ends it).' -f $u.Name, $u.Id) -ForegroundColor Yellow }
+$blocked = @($opInfo | Where-Object { $_.Mismatch })
 if ($blocked.Count -gt 0) {
     Show-Failed ('Options+ process path(s) not in allowlist.json: ' + ((@($blocked | ForEach-Object { $_.Name + '=' + $_.Path })) -join '; ') + '. Nothing was changed.')
     exit 1

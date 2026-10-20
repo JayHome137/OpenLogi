@@ -1,4 +1,4 @@
-### 2026-10-20 17:28:15 CST
+### 2026-10-20 17:35:22 CST
 ### cmd: bash -c rc=0; for f in macos/common.sh macos/run-openlogi-flow-test.sh macos/watchdog.sh macos/emergency-restore.sh macos/inject.sh macos/test-discovery.sh tools/run-offline-tests.sh; do bash -n "$f" && echo "ok $f" || rc=1; done; exit $rc
 
 ok macos/common.sh

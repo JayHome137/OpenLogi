@@ -7,21 +7,19 @@
 
 | # | 未验证项 | 影响 | 缓解 |
 |---|---|---|---|
-| U1 | 真正的 Windows PowerShell 5.1 从未运行 (只有 pwsh 7.4.6 + PSSA 5.1 兼容规则 + Pester) | 5.1 特有行为可能不同 | 已准备 5.1 只解析命令 (RUNBOOK 第 3 步, **需 Jay 另外授权**, 未运行) |
+| U1 | 真正的 Windows PowerShell 5.1 从未运行 (只有 pwsh 7.4.6 + PSSA 5.1 兼容规则 + Pester) | 5.1 特有行为可能不同 | 已准备 5.1 只解析命令 (README / `tools/PARSE-ONLY-windows.txt`, **需 Jay 另外授权**, 未运行) |
 | U2 | macOS 工具 (`launchctl`, `tccutil`, BSD `ps`/`date`/`stat`, `PlistBuddy`, `socketfilterfw`, `hdiutil`, `open`) 全是模拟/录制数据 | 输出格式不同会导致匹配失败 | 匹配失败默认 = 不碰 (fail closed); 预检先显示 |
 | U3 | macOS `/bin/bash` 3.2 只用 Linux 上自编译的 bash 3.2.57 测试 | 平台差异 | 语法检查 + 123 项测试在 3.2.57 下全部通过 |
-| U4 | Windows Options+ 可执行路径 (`C:\Program Files\LogiOptionsPlus\*.exe`, `C:\Program Files\Logi\LogiPluginService\LogiPluginService.exe`) | 路径不对 → 拒绝开始 | 预检 MISMATCH, 退出码 4, 什么都不改 |
-| U5 | Windows 是否存在 Logitech 计划任务 | 若有, 本次不会禁用它, Options+ 可能被它拉起 | 有重生监视 (Watch-OptionsPlusRespawn) 并记录 |
-| U6 | run 1 之前 `LoginCheck` 是否为启用状态 | 盲目启用可能违背 Jay 的原设置 | 只在 run-1 state 记录或 `-RepairLoginCheck` 时启用 |
+| U4 | Windows 上路径读不到的 Options+ 进程 (以管理员 + CIM 仍读不到) | 该进程不会被结束 | 记 WARN, 不阻止测试; 停服务通常会结束它 (见 README) |
+| U5 | `logioptionsplus` (界面) 和 `LogiPluginService` 在 Windows 上的路径 (run 1 中没在跑) | 若在跑且路径不同 → 拒绝开始 | 预检显示 |
 | U7 | Mac Options+ 界面 bundle id (回退 `com.logi.optionsplus`) | 只用于信息 | 恢复只用精确 bundle 路径 `open -g` |
 | U8 | `org.openlogi.agent.service` (SMAppService, KeepAlive SuccessfulExit=false) 在 bootout 后的行为 | agent 可能被重新拉起 | 恢复后再按精确路径停止 OpenLogi 进程; 报告 LEFTOVER |
 | U9 | `StartupApproved\Run` 下是否会出现 `OpenLogiAgent` 值 | 可能留下条目 | 测试前不存在才删 |
-| U10 | `tccutil reset ListenEvent/Accessibility <bundle>` 对 root/用户 TCC 库是否有效; ListenEvent 名称 | 授权条目可能残留 | RUNBOOK 第 12 步手动 "−" |
-| U11 | 本地网络 (Local Network) TCC 无法用 tccutil 重置 | 残留开关 | 报 LEFTOVER, RUNBOOK 第 12 步 |
+| U10 | `tccutil reset ListenEvent/Accessibility <bundle>` 对 root/用户 TCC 库是否有效; ListenEvent 名称 | 授权条目可能残留 | RUNBOOK 第 9 步手动 "−" |
+| U11 | 本地网络 (Local Network) TCC 无法用 tccutil 重置 | 残留开关 | 报 LEFTOVER, RUNBOOK 第 9 步 |
 | U12 | `launchctl asuser <uid> launchctl getenv/setenv/unsetenv` 在 macOS 27 上的行为 | `OPENLOGI_LOG` 可能残留 | 预检显示; 紧急恢复会 unset |
 | U13 | bash `read -t` 在 tty 上超时时是否保留已输入的半行 | 关卡输入可能丢字 | 关卡 1 秒轮询; 丢字时重新输入即可 |
 | U14 | LaunchDaemon 看门狗在 launchd 下 "最后一步 bootout 自己" 的顺序 | 看门狗可能多留一轮 | 下一轮 tick 发现无 state 退出码 10, 并删 plist |
-| U15 | Mac 上 `python3` 可用 (run 1 推断有) | 无 CLT 时会弹安装框 | 新增 `python_ok`: 用 `xcode-select -p` 检查, 不执行 shim; 不可用则在改动前停止 |
 | U16 | macOS 27 的系统设置中文菜单名称 | RUNBOOK 描述可能略不同 | RUNBOOK 写明按 14/15 界面 |
 | U17 | SmartScreen / Windows 防火墙弹窗 / macOS 防火墙弹窗何时出现 | 人工步骤 | 关卡 W1 / RUNBOOK 指引, 防火墙 "取消" 会生成阻止规则 → 明确写 "不要点取消" |
 | U18 | Windows 用 `Get-NetUDPEndpoint` 判定 42424 的拥有者是 openlogi-agent | 判定失败 → 不显示 READY, 抛 FAILED | 20 秒重试 |
@@ -31,6 +29,18 @@
 | U22 | SMAppService / 后台任务管理 (BTM) 的登录项残留 | "登录项" 里可能留下 OpenLogi | 快照中只读记录, 报告 |
 | U23 | Windows 看门狗计划任务 / Mac LaunchDaemon 在真机上按租约触发 | 崩溃时恢复延迟 | 决策逻辑 (Get-LeaseDecision / lease_decision) 已离线测试 |
 | U24 | macOS CLI 必须以用户身份 + HOME 运行才能找到 `~/.config/openlogi/agent.sock` (源码推断; run 1 用 root 跑, 很可能失败) | run 2 已改为用户身份 | — |
+
+## 已用 run-1 真实数据核实 (VERIFIED, 2026-10-20 由 GM 提供)
+- Windows Options+ 进程路径 (run-1 预快照 `info.proc.logi.paths`): `logioptionsplus_agent`, `logioptionsplus_appbroker`,
+  `logivoice\logioptionsplus_logivoice` (新增), `logioptionsplus_updater`, `logi_crashpad_handler` 的两个路径
+  (`LogiOptionsPlus\` 和 `LogiOptionsPlus\logivoice\`)。已写入 `allowlist.json` (`unverified: false`)。
+- `OptionsPlusUpdaterService`: ImagePath `"C:\Program Files\LogiOptionsPlus\logioptionsplus_updater.exe" --run-as-service`, 测试前 Automatic/Running;
+  启动服务后所有 Options+ 进程自动回来 → 恢复 = 恢复启动类型 + 启动服务 + 按名字核对进程。
+- Windows **没有** Logitech 计划任务 (唯一命中是错误的 LoginCheck)。
+- `LoginCheck` 在 run 1 之前是 Ready; 已重新启用, Jay 确认现为 Ready → 不需要修复 (`-RepairLoginCheck` 只在 README 中提及)。
+- HKLM Run `Logitech Download Assistant` 存在 → 列为 never-touch。
+- run-1 残留 (目录、state.json、看门狗任务/plist、App、日志、脚本) 已在两台机器上删除并核实。`OPENLOGI_LOG` (Mac) 未知, 由预检检查。
+- Mac 用户 `jayboy137` (`/Users/jayboy137`); Mac 有 python3 (run 1 用的是 Xcode 自带 Python3.framework 3.9)。
 
 ## 测试环境无法模拟的
 - 真 PowerShell 5.1 / .NET Framework 4.x; Windows cmdlet (`Get-ScheduledTask`, `Get-NetFirewallRule`, `Get-Service`, `Get-CimInstance`, `Get-NetUDPEndpoint`, `Register-ScheduledTask`) — Pester 中全部是带参数的 stub + Mock。
@@ -43,7 +53,7 @@
 ### 新文件
 - `allowlist.json` — 所有可改动对象的唯一机器可读清单 (见 `ALLOWLIST.md`)。
 - `ALLOWLIST.md`, `CHANGES-run2.md` (本文件), 重写 `RUNBOOK-Jay.md`, 更新 `README.md`。
-- `windows/tests/HwTest.Tests.ps1` (Pester, StrictMode Latest, 37 个测试), `windows/tests/PSScriptAnalyzerSettings.psd1`。
+- `windows/tests/HwTest.Tests.ps1` (Pester, StrictMode Latest, 44 个测试), `windows/tests/PSScriptAnalyzerSettings.psd1`。
 - `macos/testdata/`: `ps-axww-ppid.txt`, `run1-state.json`, `run1-snapshot-pre.json`, `run2-snapshot-post.json`, `flow-{prompted,paired,failed,none}.json`。
 - `tools/run-offline-tests.sh` (整套离线测试, 日志写 `test-logs/`), `tools/Test-PsParse.ps1` (只解析, 不执行)。
 
@@ -94,6 +104,14 @@
 - `OPENLOGI_LOG` 测试前不存在才 unset; run-1 残留由预检显示、紧急恢复清除。
 - Mac 鼠标注入默认关闭 (`--with-injection` 开启), 少一个辅助功能授权。`inject.sh` 修复了重复的 `--edge` 和空数组展开 (bash 3.2 `set -u` 下报错)。
 - 新增 `python_ok` 检查 (U15)。
+
+### 根据 run-1 数据的改动 (2026-10-20 第二轮)
+- `allowlist.json`: 核实的进程路径; 新增 `logioptionsplus_logivoice` 和 crashpad 第二路径; 服务 `imagePath`; `neverTouch` (Logitech Download Assistant)。
+- `Get-ProcPath`: `Process.Path` 为空时用 CIM `ExecutablePath`。进程分三类: Allowed / Unreadable (不结束, 不阻止) / Mismatch (不结束, 拒绝开始)。
+- `Restore-OptionsPlus`: 启动服务后等 60 秒, 按名字核对测试前所有 Options+ 进程; 只对 agent (和 PluginService) 在用户会话补启动; 每个名字记 OK/ERROR。
+- 预检: 显示服务 ImagePath 与清单是否一致 (仅信息); LoginCheck 提示改为指向 README。
+- 新 Pester 测试: run-1 路径全部允许、路径读不到不结束也不阻止、CIM 回退、错误路径不结束、Logitech Download Assistant 不在任何变更列表、恢复按名字核对 (全部回来 / agent 补启动 / appbroker 缺失报 ERROR)。
+- RUNBOOK-Jay.md 精简为只写操作 (78 行); 机制、清单理由、握手、run-1 回顾、紧急恢复细节移到 README.md。
 
 ### 其它
 - Windows: PAT 在改动之前以 `Read-Host -AsSecureString` 询问; 用完清除 (变量与环境变量)。Mac: PAT 用 `read -s`, 经 stdin 交给 `curl -K -`, 不出现在命令行/ps 中。仓库里没有任何 token (测试中 grep 检查)。

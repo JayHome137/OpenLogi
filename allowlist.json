@@ -5,20 +5,21 @@
     "services": [
       {
         "name": "OptionsPlusUpdaterService",
+        "imagePath": "\"C:\\Program Files\\LogiOptionsPlus\\logioptionsplus_updater.exe\" --run-as-service",
         "actions": [
           "set-starttype",
           "stop",
           "start"
         ],
         "unverified": false,
-        "note": "run 1 log: pre Automatic/Running"
+        "note": "verified run-1 pre-snapshot: Automatic/Running; starting it brings back all Options+ processes"
       }
     ],
     "scheduledTasksDisable": [],
     "scheduledTasksRepairEnableOnly": [
       {
         "path": "\\Microsoft\\Windows\\PushToInstall\\LoginCheck",
-        "note": "Run 1 wrongly disabled it. Only re-enabled if a saved run-1 state records it as disabled by the test. Never disabled."
+        "note": "Run 1 wrongly disabled it; pre-run state was Ready; re-enabled and confirmed Ready by Jay. Only re-enabled if a saved run-1 state records it, or Emergency-Restore.ps1 -RepairLoginCheck. Never disabled."
       }
     ],
     "ownScheduledTasks": [
@@ -35,23 +36,8 @@
           "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus_agent.exe"
         ],
         "restartInUserSession": true,
-        "unverified": true
-      },
-      {
-        "name": "logioptionsplus",
-        "paths": [
-          "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus.exe"
-        ],
-        "restartInUserSession": false,
-        "unverified": true
-      },
-      {
-        "name": "logioptionsplus_updater",
-        "paths": [
-          "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus_updater.exe"
-        ],
-        "restartInUserSession": false,
-        "unverified": true
+        "unverified": false,
+        "source": "verified: run-1 pre-snapshot info.proc.logi.paths"
       },
       {
         "name": "logioptionsplus_appbroker",
@@ -59,15 +45,45 @@
           "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus_appbroker.exe"
         ],
         "restartInUserSession": false,
-        "unverified": true
+        "unverified": false,
+        "source": "verified: run-1 pre-snapshot info.proc.logi.paths"
+      },
+      {
+        "name": "logioptionsplus_logivoice",
+        "paths": [
+          "C:\\Program Files\\LogiOptionsPlus\\logivoice\\logioptionsplus_logivoice.exe"
+        ],
+        "restartInUserSession": false,
+        "unverified": false,
+        "source": "verified: run-1 pre-snapshot info.proc.logi.paths"
+      },
+      {
+        "name": "logioptionsplus_updater",
+        "paths": [
+          "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus_updater.exe"
+        ],
+        "restartInUserSession": false,
+        "unverified": false,
+        "source": "verified: run-1 pre-snapshot info.proc.logi.paths (service image)"
       },
       {
         "name": "logi_crashpad_handler",
         "paths": [
-          "C:\\Program Files\\LogiOptionsPlus\\logi_crashpad_handler.exe"
+          "C:\\Program Files\\LogiOptionsPlus\\logi_crashpad_handler.exe",
+          "C:\\Program Files\\LogiOptionsPlus\\logivoice\\logi_crashpad_handler.exe"
         ],
         "restartInUserSession": false,
-        "unverified": true
+        "unverified": false,
+        "source": "verified: run-1 pre-snapshot info.proc.logi.paths"
+      },
+      {
+        "name": "logioptionsplus",
+        "paths": [
+          "C:\\Program Files\\LogiOptionsPlus\\logioptionsplus.exe"
+        ],
+        "restartInUserSession": false,
+        "unverified": true,
+        "note": "GUI; not running in run 1"
       },
       {
         "name": "LogiPluginService",
@@ -75,7 +91,8 @@
           "C:\\Program Files\\Logi\\LogiPluginService\\LogiPluginService.exe"
         ],
         "restartInUserSession": true,
-        "unverified": true
+        "unverified": true,
+        "note": "not running in run 1"
       }
     ],
     "openLogiProcesses": [
@@ -131,7 +148,17 @@
     ],
     "pathsWriteOnly": [
       "{Profile}\\OpenLogi-test-result.log"
-    ]
+    ],
+    "_scheduledTasksNote": "verified run 1: Windows has NO Logitech scheduled task (the only matcher hit was the wrong \\Microsoft\\...\\LoginCheck).",
+    "neverTouch": {
+      "registryValues": [
+        {
+          "key": "HKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run",
+          "value": "Logitech Download Assistant"
+        }
+      ],
+      "note": "documentation + test assertion only; mutations only iterate the lists above"
+    }
   },
   "macos": {
     "launchdJobs": [
