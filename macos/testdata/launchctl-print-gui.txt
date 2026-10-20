@@ -1,0 +1,20 @@
+gui/502 = {
+	type = login
+======= services ========
+	0x0     com.apple.Finder
+	12345   com.logi.cp-dev-mgr = {
+		path = /Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
+		state = running
+		pid = 4242
+	}
+	0x0     application.com.logi.pluginservice.99ABC = {
+		path = (submitted by runningboardd.420)
+		state = running
+		pid = 5555
+	}
+	0x0     com.logitech.LogiRightSight.Agent
+	0x0     com.logi.optionsplus.logivoice
+======= other ========
+	ignored
+}
+======= disabled services ========

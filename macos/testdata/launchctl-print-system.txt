@@ -1,0 +1,10 @@
+system = {
+======= services ========
+	0x0     com.apple.apsd
+	0x0     com.logi.optionsplus.updater = {
+		path = /Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/Frameworks/logioptionsplus_updater.app/Contents/MacOS/logioptionsplus_updater
+		state = running
+		pid = 777
+	}
+======= xpc services ========
+}

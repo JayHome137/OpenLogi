@@ -1,0 +1,6 @@
+disabled services = {
+	"com.logi.optionsplus.logivoice" => disabled
+	"com.logitech.LogiRightSight.Agent" => disabled
+	"com.logitech.manager.daemon" => enabled
+	"com.logi.cp-dev-mgr" => enabled
+}

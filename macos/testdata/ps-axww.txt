@@ -1,0 +1,11 @@
+  100 /System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow console
+  101 /usr/libexec/logind
+  102 /Library/Application
+ 4242 /Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
+  777 /Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/Frameworks/logioptionsplus_updater.app/Contents/MacOS/logioptionsplus_updater
+ 5555 /Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginService
+ 5556 /Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginServiceNative
+ 5557 /Applications/Utilities/LogiPluginService.app/Contents/MacOS/LogiPluginServiceExt
+ 6000 /Applications/logioptionsplus.app/Contents/MacOS/logioptionsplus
+ 7000 /Applications/OpenLogi.app/Contents/MacOS/openlogi-agent
+  200 /sbin/launchd
