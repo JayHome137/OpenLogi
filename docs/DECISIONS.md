@@ -4,6 +4,75 @@ Durable "why we did it this way" records that are not obvious from the code.
 Add a dated entry when a non-obvious architectural or dependency decision is
 made or revisited.
 
+## 2026-10: The lock-key indicator follows Logi Options+ 2.8, without Fn Lock
+
+Logi Options+ 2.8 shows lock-key changes in its own on-screen indicator. Its
+`0x4220` handler compares each broadcast bitmask with the last one and posts
+one indicator per changed bit. Its `osd_resources.json` shows Caps Lock on
+every platform and Num Lock and Scroll Lock on Windows only. OpenLogi follows
+both rules.
+
+- **A baseline before the first change.** The agent reads the keyboard's lock
+  state (`GetLockState`) when it learns the device, and announces only bits
+  that change after that. Num Lock is usually on under Windows, so a keyboard
+  that connects must not announce it. A keyboard that goes offline, or that
+  reconnects between two scans, loses its baseline and is read again. Options+
+  probably reads a baseline at start too; that part of the disassembly is not
+  verified.
+- **The agent sees every change; the indicator shows the latest.** The device
+  layer hands changes to the agent in a small queue, not a latest-value cell,
+  so a change the platform rule drops (Num Lock on macOS) cannot hide one it
+  keeps (Caps Lock) reported with it. The indicator shows only the latest
+  change, so presses in quick succession can skip the states between them.
+- **The agent owns the indicator.** It shows a change for 1.5 seconds, the
+  backlight indicator's time, and a newer change replaces it. The overlay
+  hides the indicator when the connection to the agent drops, as it does for
+  notices.
+- **On by default.** One global switch, `lock_key_notifications`, turns it
+  off. The Options+ default for its setting was not found in the static
+  analysis.
+- **No Fn Lock yet.** Options+ also shows "Media Keys" and "F-Keys". OpenLogi
+  writes the Fn Lock state back to a keyboard when it reconnects, and the
+  keyboard reports that write like a key press, so the indicator would show
+  on every reconnect. That needs its own decision.
+
+Verified with unit tests. Nobody has seen the indicator on screen with a real
+keyboard yet.
+
+## 2026-10: Low-battery notices are drawn by the overlay, not sent as OS notifications
+
+Logi Options+ 2.8 shows a low battery in its own on-screen toast
+(`logi::overlay::battery_notification`, the `low_battery` entry of its
+`notification_resources.json`), on by default. It sends OS notifications only
+for macros and integrations. OpenLogi follows the same split.
+
+- **No notification permission.** An OS notification needs authorization on
+  macOS, a registered app identity on Windows, and a notification daemon on
+  Linux. The overlay runs whenever the agent is armed, with or without the
+  settings app, and already places windows per display.
+- **One rule for low.** `BatteryInfo::needs_attention` in `openlogi-core`
+  decides it for the agent's notice and the settings app's battery colour, and
+  an ast-grep rule keeps a second copy out.
+- **The agent owns a notice.** It decides when to post one and when it ends
+  (8 seconds), so an overlay that starts or reconnects sees only the notices
+  that are current. Notices travel in their own observation cell
+  (`observe_notices`), not in the agent snapshot, so a notice does not wake
+  every state observer. When the connection to the agent drops, the overlay
+  clears the cards at once, because nothing else would ever end them. The
+  backlight indicator follows the same rule.
+- **Once per discharge.** A device is announced when it becomes low, and
+  again only after it charges or reads 30% or more, so a reading that wobbles
+  around 20% does not repeat the notice.
+- **Not click-through.** The card sits at the bottom centre of the usable area
+  of the display under the cursor (macOS visible frame, Windows work area,
+  Wayland layer-shell surface anchored to the bottom edge, X11 display). It
+  opens without taking focus, and a click closes it.
+
+Verified with unit tests, and on screen on macOS against the mock agent's
+demo: the card appears at the bottom centre above the Dock and closes after 8
+seconds. A click to close is covered by unit tests only. The Windows and Linux
+windows are checked only by CI builds; nobody has seen them on screen yet.
+
 ## 2026-10: Litra is reached over HID++ `0x1990`, with the raw report as fallback
 
 The "raw" Litra report `[0x11, 0xff, 0x04, …]` was always a HID++ 2.0 long
