@@ -140,3 +140,7 @@
 - `inject.sh` (默认关闭) 仍使用 osascript。
 - `open -g -j` 恢复 LogiPluginService 时窗口可能处于隐藏状态。
 - Windows 控制台 QuickEdit: 点击窗口会暂停输出 (RUNBOOK 已提示不要点)。
+
+## 第四轮 (2026-10-20 17:57)
+- GATE W0 / RUNBOOK 第 1、3 步: "关掉 Options+ 窗口；如果还卡在这里，右下角托盘里右键 Options+ 图标 > 退出"。**UNVERIFIED**: 点 X 是否结束 `logioptionsplus`; 托盘"退出"实际会停掉哪些进程 (agent / appbroker / logivoice / crashpad / updater?)。
+- 基线顺序 (已是如此, 加注释说明): Windows 的预快照 (Options+ 进程 + 服务状态 = 恢复和对比的基线) 在 W0 通过**之后**才采集。托盘退出若也停了后台进程, 基线就是"已停", 不会误报 FAIL, 恢复也不会重新启动 Jay 主动退出的进程。Preflight 只报告窗口状态, 不等待。

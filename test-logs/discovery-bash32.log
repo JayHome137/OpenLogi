@@ -1,4 +1,4 @@
-### 2026-10-20 17:55:40 CST
+### 2026-10-20 17:58:15 CST
 ### cmd: /tmp/bash-3.2.57/bash macos/test-discovery.sh
 
 bash: 3.2.57(2)-release
@@ -37,7 +37,7 @@ PASS: GUI detected (exact main executable)
 PASS: LogiPluginService detected
 PASS: old 'pid command' ps format still parsed
 === kill guard (dry) ===
-2026-10-20T17:55:40+0800 [INFO] kill [test] 4242	logioptionsplus_agent	/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
+2026-10-20T17:58:15+0800 [INFO] kill [test] 4242	logioptionsplus_agent	/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
 PASS: kill allowlisted agent 4242
 PASS: refuse to kill pid 100
 PASS: refuse to kill pid 101
@@ -80,8 +80,8 @@ PASS: non-allowlisted path refused: /Applications/logioptionsplus.app
 PASS: non-allowlisted path refused: /Applications/OpenLogi.app/../logioptionsplus.app
 PASS: non-allowlisted path refused: /Applications/OpenLogi.app/
 PASS: non-allowlisted path refused: /Users/jayboy137/.config/openlogi2
-PASS: non-allowlisted path refused: /tmp/ol-hwtest-harness.TEw7CS/fake
-PASS: rm_safe refuses /tmp/ol-hwtest-harness.TEw7CS/fake
+PASS: non-allowlisted path refused: /tmp/ol-hwtest-harness.9tDFYz/fake
+PASS: rm_safe refuses /tmp/ol-hwtest-harness.9tDFYz/fake
 PASS: rm_safe really did not remove it
 PASS: dry rm log empty
 === open guard (dry) ===

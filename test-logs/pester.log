@@ -1,4 +1,4 @@
-### 2026-10-20 17:55:17 CST
+### 2026-10-20 17:57:52 CST
 ### cmd: pwsh -NoProfile -c 
 Import-Module Pester -MinimumVersion 5.0
 $c = New-PesterConfiguration; $c.Run.Path = "./windows/tests"; $c.Output.Verbosity = "Detailed"; $c.Run.PassThru = $true
@@ -11,57 +11,57 @@ Running tests from 1 files.
 
 Running tests from '/workspace/openlogi-hwtest/windows/tests/HwTest.Tests.ps1'
 Describing StrictMode helpers (run-1 crash class)
-  [+] Get-Count handles $null, scalar, array 168ms
-  [+] Get-Count of an EMPTY command result is 0 (was 1 before run 2: @($null).Count = 1) 175ms
-  [+] Get-AL returns no phantom $null entries for empty / missing keys 6ms
-  [+] Get-Prop never throws on missing properties 12ms
-  [+] reproduces the run-1 crash: .Count on a single real Process object throws under StrictMode 34ms
-  [+] Test-InList: empty value / null list never match 10ms
+  [+] Get-Count handles $null, scalar, array 182ms
+  [+] Get-Count of an EMPTY command result is 0 (was 1 before run 2: @($null).Count = 1) 197ms
+  [+] Get-AL returns no phantom $null entries for empty / missing keys 9ms
+  [+] Get-Prop never throws on missing properties 21ms
+  [+] reproduces the run-1 crash: .Count on a single real Process object throws under StrictMode 72ms
+  [+] Test-InList: empty value / null list never match 11ms
 
 Describing Watch-OptionsPlusRespawn (0 / 1 / many processes)
-2026-10-20T17:55:20.822+08:00 [INFO] Respawn check (1s): 0 respawned Options+ process(es)
-  [+] returns 0 when Get-Process returns nothing 1.42s
-2026-10-20T17:55:21.098+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
-2026-10-20T17:55:21.455+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
-2026-10-20T17:55:21.782+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
-2026-10-20T17:55:22.086+08:00 [INFO] Respawn check (1s): 3 respawned Options+ process(es)
-  [+] handles a SINGLE respawned process (scalar, the run-1 crash) 1.22s
-2026-10-20T17:55:22.198+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
-2026-10-20T17:55:22.201+08:00 [RESPAWN] Kill [respawn] LogiPluginService pid=5555 path=C:\Program Files\Logi\LogiPluginService\LogiPluginService.exe parent=?
-2026-10-20T17:55:22.203+08:00 [WARN] NOT killing logioptionsplus_agent pid=6666: path 'C:\Users\jay\Downloads\logioptionsplus_agent.exe' is not in allowlist.json
-2026-10-20T17:55:22.531+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
-2026-10-20T17:55:22.534+08:00 [RESPAWN] Kill [respawn] LogiPluginService pid=5555 path=C:\Program Files\Logi\LogiPluginService\LogiPluginService.exe parent=?
-2026-10-20T17:55:22.536+08:00 [WARN] NOT killing logioptionsplus_agent pid=6666: path 'C:\Users\jay\Downloads\logioptionsplus_agent.exe' is not in allowlist.json
-2026-10-20T17:55:22.857+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
-2026-10-20T17:55:22.860+08:00 [RESPAWN] Kill [respawn] LogiPluginService pid=5555 path=C:\Program Files\Logi\LogiPluginService\LogiPluginService.exe parent=?
-2026-10-20T17:55:22.862+08:00 [WARN] NOT killing logioptionsplus_agent pid=6666: path 'C:\Users\jay\Downloads\logioptionsplus_agent.exe' is not in allowlist.json
-2026-10-20T17:55:23.164+08:00 [INFO] Respawn check (1s): 6 respawned Options+ process(es)
-  [+] handles MANY processes and never kills a non-allowlisted path 1.07s
+2026-10-20T17:57:55.704+08:00 [INFO] Respawn check (1s): 0 respawned Options+ process(es)
+  [+] returns 0 when Get-Process returns nothing 1.18s
+2026-10-20T17:57:56.083+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
+2026-10-20T17:57:56.479+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
+2026-10-20T17:57:56.847+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
+2026-10-20T17:57:57.157+08:00 [INFO] Respawn check (1s): 3 respawned Options+ process(es)
+  [+] handles a SINGLE respawned process (scalar, the run-1 crash) 1.4s
+2026-10-20T17:57:57.324+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
+2026-10-20T17:57:57.332+08:00 [RESPAWN] Kill [respawn] LogiPluginService pid=5555 path=C:\Program Files\Logi\LogiPluginService\LogiPluginService.exe parent=?
+2026-10-20T17:57:57.337+08:00 [WARN] NOT killing logioptionsplus_agent pid=6666: path 'C:\Users\jay\Downloads\logioptionsplus_agent.exe' is not in allowlist.json
+2026-10-20T17:57:57.693+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
+2026-10-20T17:57:57.701+08:00 [RESPAWN] Kill [respawn] LogiPluginService pid=5555 path=C:\Program Files\Logi\LogiPluginService\LogiPluginService.exe parent=?
+2026-10-20T17:57:57.706+08:00 [WARN] NOT killing logioptionsplus_agent pid=6666: path 'C:\Users\jay\Downloads\logioptionsplus_agent.exe' is not in allowlist.json
+2026-10-20T17:57:58.039+08:00 [RESPAWN] Kill [respawn] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
+2026-10-20T17:57:58.045+08:00 [RESPAWN] Kill [respawn] LogiPluginService pid=5555 path=C:\Program Files\Logi\LogiPluginService\LogiPluginService.exe parent=?
+2026-10-20T17:57:58.048+08:00 [WARN] NOT killing logioptionsplus_agent pid=6666: path 'C:\Users\jay\Downloads\logioptionsplus_agent.exe' is not in allowlist.json
+2026-10-20T17:57:58.350+08:00 [INFO] Respawn check (1s): 6 respawned Options+ process(es)
+  [+] handles MANY processes and never kills a non-allowlisted path 1.18s
 
 Describing Scheduled task matching (run-1 LoginCheck bug)
-  [+] zero tasks -> empty array 14ms
-  [+] one task (scalar) -> one result 7ms
-  [+] excludes \Microsoft\Windows\PushToInstall\LoginCheck and includes \LogiOptionsPlus\ 14ms
+  [+] zero tasks -> empty array 19ms
+  [+] one task (scalar) -> one result 10ms
+  [+] excludes \Microsoft\Windows\PushToInstall\LoginCheck and includes \LogiOptionsPlus\ 17ms
   [+] never allows disabling anything under \Microsoft\ or not in the allowlist 3ms
-  [+] allows re-enabling LoginCheck only via the repair list (run-1 damage) 29ms
+  [+] allows re-enabling LoginCheck only via the repair list (run-1 damage) 6ms
 
 Describing Stop-OptionsPlus touches only allowlisted items
-2026-10-20T17:55:23.295+08:00 [SECT] ==== STOP Options+ (allowlist only) ====
-2026-10-20T17:55:23.325+08:00 [INFO] Service OptionsPlusUpdaterService: StartType=Manual Status=Stopped
-2026-10-20T17:55:23.327+08:00 [WARN] Scheduled task observed but NOT in allowlist (not touched): \LogiOptionsPlus\UpdaterTask state=Ready
-2026-10-20T17:55:23.337+08:00 [INFO] Kill [initial] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
-2026-10-20T17:55:23.339+08:00 [WARN] NOT killing logioptionsplus_agent pid=6666: path 'D:\elsewhere\logioptionsplus_agent.exe' is not in allowlist.json
-  [+] changes only OptionsPlusUpdaterService, disables no task, kills only the allowlisted path 92ms
+2026-10-20T17:57:58.511+08:00 [SECT] ==== STOP Options+ (allowlist only) ====
+2026-10-20T17:57:58.544+08:00 [INFO] Service OptionsPlusUpdaterService: StartType=Manual Status=Stopped
+2026-10-20T17:57:58.547+08:00 [WARN] Scheduled task observed but NOT in allowlist (not touched): \LogiOptionsPlus\UpdaterTask state=Ready
+2026-10-20T17:57:58.562+08:00 [INFO] Kill [initial] logioptionsplus_agent pid=4242 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_agent.exe parent=?
+2026-10-20T17:57:58.565+08:00 [WARN] NOT killing logioptionsplus_agent pid=6666: path 'D:\elsewhere\logioptionsplus_agent.exe' is not in allowlist.json
+  [+] changes only OptionsPlusUpdaterService, disables no task, kills only the allowlisted path 137ms
 
 Describing Run-1 verified Options+ paths, unreadable paths
-  [+] all run-1 observed paths are allowlisted (incl. both crashpad paths and logivoice) 28ms
-2026-10-20T17:55:23.441+08:00 [WARN] NOT killing logioptionsplus_appbroker pid=21: executable path unreadable (left running; the service stop normally ends it)
-  [+] unreadable path: NOT killed, NOT a mismatch (does not block the run) 63ms
-2026-10-20T17:55:23.480+08:00 [INFO] Kill [initial] logioptionsplus_updater pid=22 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_updater.exe parent=?
-  [+] empty Process.Path falls back to CIM ExecutablePath (then exact match applies) 39ms
-2026-10-20T17:55:23.510+08:00 [WARN] NOT killing logioptionsplus_appbroker pid=23: path 'C:\Temp\logioptionsplus_appbroker.exe' is not in allowlist.json
-  [+] readable but wrong path is a Mismatch and is never killed 27ms
-  [+] HKLM Run "Logitech Download Assistant" is never-touch and not in any mutation list 8ms
+  [+] all run-1 observed paths are allowlisted (incl. both crashpad paths and logivoice) 40ms
+2026-10-20T17:57:58.672+08:00 [WARN] NOT killing logioptionsplus_appbroker pid=21: executable path unreadable (left running; the service stop normally ends it)
+  [+] unreadable path: NOT killed, NOT a mismatch (does not block the run) 53ms
+2026-10-20T17:57:58.762+08:00 [INFO] Kill [initial] logioptionsplus_updater pid=22 path=C:\Program Files\LogiOptionsPlus\logioptionsplus_updater.exe parent=?
+  [+] empty Process.Path falls back to CIM ExecutablePath (then exact match applies) 88ms
+2026-10-20T17:57:58.803+08:00 [WARN] NOT killing logioptionsplus_appbroker pid=23: path 'C:\Temp\logioptionsplus_appbroker.exe' is not in allowlist.json
+  [+] readable but wrong path is a Mismatch and is never killed 36ms
+  [+] HKLM Run "Logitech Download Assistant" is never-touch and not in any mutation list 10ms
 
 Describing Restore-OptionsPlus: service start brings processes back, verified by name
 2026-10-20T10:00:00.000+08:00 [SECT] ==== RESTORE Options+ ====
@@ -72,7 +72,7 @@ Describing Restore-OptionsPlus: service start brings processes back, verified by
 2026-10-20T10:00:00.000+08:00 [INFO] restore[OK] process logioptionsplus_logivoice running again
 2026-10-20T10:00:00.000+08:00 [INFO] restore[OK] process logioptionsplus_updater running again
 2026-10-20T10:00:00.000+08:00 [INFO] Options+ processes now: logioptionsplus_agent
-  [+] all back after the service start -> OK for every name, no user-session restart 145ms
+  [+] all back after the service start -> OK for every name, no user-session restart 175ms
 2026-10-20T10:00:00.000+08:00 [SECT] ==== RESTORE Options+ ====
 2026-10-20T10:00:00.000+08:00 [INFO] restore[OK] service OptionsPlusUpdaterService absent before - nothing to do
 2026-10-20T10:01:00.000+08:00 [INFO] restore[OK] process logi_crashpad_handler running again
@@ -82,74 +82,74 @@ Describing Restore-OptionsPlus: service start brings processes back, verified by
 2026-10-20T10:01:10.000+08:00 [INFO] restore[OK] process logioptionsplus_logivoice running again
 2026-10-20T10:01:10.000+08:00 [INFO] restore[OK] process logioptionsplus_updater running again
 2026-10-20T10:01:10.000+08:00 [INFO] Options+ processes now: logioptionsplus_logivoice
-  [+] agent missing -> restarted in the user session; appbroker missing -> ERROR (no restart, not restartInUserSession) 176ms
+  [+] agent missing -> restarted in the user session; appbroker missing -> ERROR (no restart, not restartInUserSession) 228ms
 
 Describing Restore is best-effort per item
-2026-10-20T17:55:23.879+08:00 [SECT] ==== FULL RESTORE (test) ====
-2026-10-20T17:55:23.888+08:00 [WARN] Pre-snapshot not found - using defaults (OptionsPlusUpdaterService -> Automatic, Running)
-2026-10-20T17:55:23.898+08:00 [ERROR] restore[ERROR] step stop OpenLogi (releases input hooks) injected failure
-2026-10-20T17:55:23.906+08:00 [INFO] restore[OK] step remove own user tasks 
-2026-10-20T17:55:23.914+08:00 [INFO] restore[OK] step restore Options+ 
-2026-10-20T17:55:23.922+08:00 [INFO] restore[OK] step firewall 
-2026-10-20T17:55:23.930+08:00 [INFO] restore[OK] step registry 
-2026-10-20T17:55:23.937+08:00 [INFO] restore[OK] step files 
-2026-10-20T17:55:23.945+08:00 [INFO] restore[OK] step unregister watchdog 
-2026-10-20T17:55:23.947+08:00 [INFO] restore[OK] step remove work dir 
-2026-10-20T17:55:23.948+08:00 [SECT] ==== RESTORE SUMMARY ====
-2026-10-20T17:55:23.950+08:00 [INFO]   ERROR    step stop OpenLogi (releases input hooks) injected failure
-2026-10-20T17:55:23.951+08:00 [ERROR] RESTORE SUMMARY: 7 ok, 1 error(s), 0 warning/leftover(s)
-2026-10-20T17:55:23.952+08:00 [INFO] Only remaining test file: /tmp/olhw-pester-d6f89f47a19d4d4092b1788628bac847/result.log
-  [+] Invoke-FullRestore continues past a failing step and reports it 116ms
-2026-10-20T17:55:23.985+08:00 [SECT] ==== RESTORE Options+ ====
-2026-10-20T17:55:23.990+08:00 [ERROR] restore[ERROR] service OptionsPlusUpdaterService service query failed
-2026-10-20T17:55:23.999+08:00 [INFO] restore[OK] task re-enable \Microsoft\Windows\PushToInstall\LoginCheck state=Ready
-2026-10-20T17:55:24.000+08:00 [ERROR] restore[ERROR] task \Microsoft\Windows\Defrag\ScheduledDefrag recorded as disabled but not in allowlist - NOT touched; check manually
-2026-10-20T17:55:24.038+08:00 [INFO] Options+ processes now: 
-  [+] Restore-OptionsPlus: a service error does not stop task repair; non-allowlisted task is NOT enabled 78ms
+2026-10-20T17:57:59.263+08:00 [SECT] ==== FULL RESTORE (test) ====
+2026-10-20T17:57:59.272+08:00 [WARN] Pre-snapshot not found - using defaults (OptionsPlusUpdaterService -> Automatic, Running)
+2026-10-20T17:57:59.283+08:00 [ERROR] restore[ERROR] step stop OpenLogi (releases input hooks) injected failure
+2026-10-20T17:57:59.291+08:00 [INFO] restore[OK] step remove own user tasks 
+2026-10-20T17:57:59.300+08:00 [INFO] restore[OK] step restore Options+ 
+2026-10-20T17:57:59.308+08:00 [INFO] restore[OK] step firewall 
+2026-10-20T17:57:59.317+08:00 [INFO] restore[OK] step registry 
+2026-10-20T17:57:59.325+08:00 [INFO] restore[OK] step files 
+2026-10-20T17:57:59.333+08:00 [INFO] restore[OK] step unregister watchdog 
+2026-10-20T17:57:59.336+08:00 [INFO] restore[OK] step remove work dir 
+2026-10-20T17:57:59.337+08:00 [SECT] ==== RESTORE SUMMARY ====
+2026-10-20T17:57:59.339+08:00 [INFO]   ERROR    step stop OpenLogi (releases input hooks) injected failure
+2026-10-20T17:57:59.339+08:00 [ERROR] RESTORE SUMMARY: 7 ok, 1 error(s), 0 warning/leftover(s)
+2026-10-20T17:57:59.340+08:00 [INFO] Only remaining test file: /tmp/olhw-pester-8d6edb84f4f84ef09bdccca6aad4a3d1/result.log
+  [+] Invoke-FullRestore continues past a failing step and reports it 129ms
+2026-10-20T17:57:59.378+08:00 [SECT] ==== RESTORE Options+ ====
+2026-10-20T17:57:59.383+08:00 [ERROR] restore[ERROR] service OptionsPlusUpdaterService service query failed
+2026-10-20T17:57:59.394+08:00 [INFO] restore[OK] task re-enable \Microsoft\Windows\PushToInstall\LoginCheck state=Ready
+2026-10-20T17:57:59.395+08:00 [ERROR] restore[ERROR] task \Microsoft\Windows\Defrag\ScheduledDefrag recorded as disabled but not in allowlist - NOT touched; check manually
+2026-10-20T17:57:59.433+08:00 [INFO] Options+ processes now: 
+  [+] Restore-OptionsPlus: a service error does not stop task repair; non-allowlisted task is NOT enabled 84ms
 
 Describing Allowlist enforcement (non-allowlisted items are never touched)
-2026-10-20T17:55:24.065+08:00 [ERROR] restore[ERROR] remove /tmp/olhw-pester-d6f89f47a19d4d4092b1788628bac847/victim path not in allowlist - refused
-  [+] Remove-PathSafe refuses paths that are not allowlisted 16ms
-  [+] Test-PathAllowed: exact allowlisted paths only 14ms
-  [+] Invoke-UserTask refuses a task name not in ownScheduledTasks 14ms
-2026-10-20T17:55:24.125+08:00 [INFO] restore[OK] kill openlogi-agent pid 7000 C:\Users\jay\OpenLogi-hwtest-pkg\OpenLogi\openlogi-agent.exe
-2026-10-20T17:55:24.125+08:00 [WARN] restore[LEFTOVER] openlogi process openlogi-agent pid 7003 path 'C:\dev\OpenLogi\target\release\openlogi-agent.exe' is not the test package - NOT killed
-2026-10-20T17:55:24.132+08:00 [ERROR] restore[ERROR] openlogi processes still alive: openlogi-agent:7000
-  [+] Stop-OpenLogi kills only the test package path; other OpenLogi builds are LEFTOVER 38ms
-2026-10-20T17:55:24.164+08:00 [INFO] restore[OK] firewall remove OpenLogiHwTest-UDP-42424 
-2026-10-20T17:55:24.173+08:00 [WARN] restore[LEFTOVER] firewall rule not created by script: TCP Query User{ABC}C:\x\openlogi-agent.exe|openlogi-agent|True|Inbound|Allow|Private|C:\x\openlogi-agent.exe not in allowlist - remove manually if unwanted (RUNBOOK 第 9 步)
-  [+] Remove-TestFirewallRules removes only exact own rule names 41ms
+2026-10-20T17:57:59.464+08:00 [ERROR] restore[ERROR] remove /tmp/olhw-pester-8d6edb84f4f84ef09bdccca6aad4a3d1/victim path not in allowlist - refused
+  [+] Remove-PathSafe refuses paths that are not allowlisted 19ms
+  [+] Test-PathAllowed: exact allowlisted paths only 24ms
+  [+] Invoke-UserTask refuses a task name not in ownScheduledTasks 16ms
+2026-10-20T17:57:59.542+08:00 [INFO] restore[OK] kill openlogi-agent pid 7000 C:\Users\jay\OpenLogi-hwtest-pkg\OpenLogi\openlogi-agent.exe
+2026-10-20T17:57:59.542+08:00 [WARN] restore[LEFTOVER] openlogi process openlogi-agent pid 7003 path 'C:\dev\OpenLogi\target\release\openlogi-agent.exe' is not the test package - NOT killed
+2026-10-20T17:57:59.553+08:00 [ERROR] restore[ERROR] openlogi processes still alive: openlogi-agent:7000
+  [+] Stop-OpenLogi kills only the test package path; other OpenLogi builds are LEFTOVER 49ms
+2026-10-20T17:57:59.590+08:00 [INFO] restore[OK] firewall remove OpenLogiHwTest-UDP-42424 
+2026-10-20T17:57:59.600+08:00 [WARN] restore[LEFTOVER] firewall rule not created by script: TCP Query User{ABC}C:\x\openlogi-agent.exe|openlogi-agent|True|Inbound|Allow|Private|C:\x\openlogi-agent.exe not in allowlist - remove manually if unwanted (RUNBOOK 第 9 步)
+  [+] Remove-TestFirewallRules removes only exact own rule names 46ms
 
 Describing Lease watchdog
-  [+] decision table 49ms
-  [+] renewal is now+lease, capped at the hard cap 10ms
-  [+] Update-Lease writes lease.json that Read-Lease and the watchdog understand 50ms
-  [+] expired lease + alive main -> fire (hung main is not trusted forever) 2ms
+  [+] decision table 12ms
+  [+] renewal is now+lease, capped at the hard cap 13ms
+  [+] Update-Lease writes lease.json that Read-Lease and the watchdog understand 95ms
+  [+] expired lease + alive main -> fire (hung main is not trusted forever) 3ms
 
 Describing Wait-HumanGate (no countdowns)
-2026-10-20T17:55:24.328+08:00 [GATE] GATE OPEN: t
-2026-10-20T17:55:24.351+08:00 [WARN] GATE SKIPPED by user: t
-  [+] skip 56ms
-2026-10-20T17:55:24.363+08:00 [GATE] GATE OPEN: t
-2026-10-20T17:55:24.365+08:00 [GATE] GATE command: y
-  [+] listed command 12ms
-2026-10-20T17:55:24.377+08:00 [GATE] GATE OPEN: t
-2026-10-20T17:55:24.379+08:00 [ERROR] GATE ABORT by user: t
-  [+] abort throws OperationCanceledException 17ms
-2026-10-20T17:55:24.393+08:00 [GATE] GATE OPEN: t
-2026-10-20T17:55:24.396+08:00 [GATE]   status: ok
-2026-10-20T17:55:24.397+08:00 [GATE] GATE PASSED (auto-detected): t
-  [+] auto-continues when the check passes 12ms
-2026-10-20T17:55:24.408+08:00 [GATE] GATE OPEN: t
-2026-10-20T17:55:24.410+08:00 [GATE]   status: no
+2026-10-20T17:57:59.780+08:00 [GATE] GATE OPEN: t
+2026-10-20T17:57:59.802+08:00 [WARN] GATE SKIPPED by user: t
+  [+] skip 57ms
+2026-10-20T17:57:59.816+08:00 [GATE] GATE OPEN: t
+2026-10-20T17:57:59.818+08:00 [GATE] GATE command: y
+  [+] listed command 14ms
+2026-10-20T17:57:59.832+08:00 [GATE] GATE OPEN: t
+2026-10-20T17:57:59.835+08:00 [ERROR] GATE ABORT by user: t
+  [+] abort throws OperationCanceledException 20ms
+2026-10-20T17:57:59.852+08:00 [GATE] GATE OPEN: t
+2026-10-20T17:57:59.855+08:00 [GATE]   status: ok
+2026-10-20T17:57:59.856+08:00 [GATE] GATE PASSED (auto-detected): t
+  [+] auto-continues when the check passes 15ms
+2026-10-20T17:57:59.870+08:00 [GATE] GATE OPEN: t
+2026-10-20T17:57:59.872+08:00 [GATE]   status: no
   还没满足: no  (完成后再按回车; 或输入 skip / abort)
   还没满足: no  (完成后再按回车; 或输入 skip / abort)
-  [+] Enter with failing check keeps waiting; never times out on its own 345ms
-2026-10-20T17:55:24.754+08:00 [GATE] GATE OPEN: t
-2026-10-20T17:55:24.756+08:00 [WARN] GATE SKIPPED by user: t
-  [+] renews the lease when the gate opens 17ms
-2026-10-20T17:55:24.772+08:00 [GATE] GATE OPEN: t
-  [+] hard cap reached at a gate -> throws 12ms
+  [+] Enter with failing check keeps waiting; never times out on its own 514ms
+2026-10-20T17:58:00.385+08:00 [GATE] GATE OPEN: t
+2026-10-20T17:58:00.387+08:00 [WARN] GATE SKIPPED by user: t
+  [+] renews the lease when the gate opens 18ms
+2026-10-20T17:58:00.404+08:00 [GATE] GATE OPEN: t
+  [+] hard cap reached at a gate -> throws 13ms
 
 Describing Flow status parsing
   [+] Prompted 13ms
@@ -157,8 +157,8 @@ Describing Flow status parsing
   [+] Failed / null / unavailable 6ms
 
 Describing Run-1 state compatibility
-  [+] Read-State maps the run-1 layout 51ms
-Tests completed in 6.39s
+  [+] Read-State maps the run-1 layout 23ms
+Tests completed in 7.05s
 Tests Passed: 44, Failed: 0, Skipped: 0, Inconclusive: 0, NotRun: 0
 TOTAL passed=44 failed=0
 ### exit=0

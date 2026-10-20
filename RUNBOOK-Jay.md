@@ -7,6 +7,7 @@
 - 安全弹窗 (SmartScreen、"仍要打开"、防火墙) 可能出现的时机不同, 也可能不出现。
 - macOS 27 的设置菜单名字可能和下面略有不同。
 - 结束后 Mac 的"本地网络"权限条目要你手动关掉 (第 9 步)。
+- 托盘 "退出" Options+ 会不会连后台进程一起停, 没验证过; 不影响测试结果。
 - Windows 上请用 `abort`, 不要用 Ctrl+C (Ctrl+C 不一定会恢复)。
 - 测完请确认 Options+ 在两台上都正常; 不正常就跑第 8 步的恢复命令。
 
@@ -21,7 +22,7 @@
 - (只给 Windows 用) 建 PAT: 在 .9 浏览器打开 https://github.com/settings/personal-access-tokens/new → Token name `openlogi-hwtest-run2`, Expiration `7 days` → Repository access 选 **Only select repositories** → 选 **JayHome137/OpenLogi** → Permissions → **Actions: Read-only** (其它不动) → **Generate token** → 复制 (只显示一次)。不想用 PAT: 在 .9 浏览器下载 Windows 的 artifact zip, 第 3 步命令末尾加 ` -ArtifactZip "<zip 路径>"`。
 - (Mac 用) 在 **.8 的浏览器**打开 https://github.com/JayHome137/OpenLogi/actions/runs/39235760610 → 页面下方 **Artifacts** → 点 **OpenLogi-macos-dmg-arm64** 下载 (存到 **下载** 文件夹)。
 
-**1. 预检 .9 (1 分钟)** — **先关掉 Options+ 窗口** (Options+ 后台服务不用管)。开始菜单搜 **Windows PowerShell** → 右键 **以管理员身份运行** → **是**。粘贴:
+**1. 预检 .9 (1 分钟)** — **关掉 Options+ 窗口；如果还卡在这里，右下角托盘里右键 Options+ 图标 > 退出。** 开始菜单搜 **Windows PowerShell** → 右键 **以管理员身份运行** → **是**。粘贴:
 ```
 Set-ExecutionPolicy -Scope Process Bypass -Force; & "$env:LOCALAPPDATA\Temp\ol-hwtest\windows\Invoke-OpenLogiFlowTest.ps1" -Mode Preflight
 ```
@@ -33,7 +34,7 @@ sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode preflight -
 ```
 `PREFLIGHT RESULT: OK` → 继续。看到 `!!! codesign ... NOT signed` → 停, 告诉 GM。窗口别关。
 
-**3. 先启动 .9 (3–5 分钟)** — **先关掉 Options+ 窗口** (如果还开着, 脚本会停在 GATE W0 等你关, 关好按回车)。在 .9 的管理员窗口粘贴:
+**3. 先启动 .9 (3–5 分钟)** — **关掉 Options+ 窗口；如果还卡在这里，右下角托盘里右键 Options+ 图标 > 退出** (窗口还开着时脚本停在 GATE W0, 关好按回车)。在 .9 的管理员窗口粘贴:
 ```
 Set-ExecutionPolicy -Scope Process Bypass -Force; & "$env:LOCALAPPDATA\Temp\ol-hwtest\windows\Invoke-OpenLogiFlowTest.ps1" -Mode Run
 ```

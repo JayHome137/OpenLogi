@@ -213,9 +213,12 @@ if (-not $ArtifactZip -and -not $DownloadToken -and -not $DownloadTokenSecure -a
     if (-not $DownloadTokenSecure -or $DownloadTokenSecure.Length -eq 0) { Show-Failed 'No PAT entered and no -ArtifactZip. Nothing was changed.'; exit 1 }
 }
 # GATE W0 (nothing changed yet): the Options+ WINDOW is never killed by the script (it would not be restarted).
+# ORDER MATTERS: the pre-snapshot (Options+ processes + service state = the restore/diff baseline) is taken only
+# AFTER W0 passes. If Jay's tray "退出" also stops background processes (UNVERIFIED), that post-W0 state is the
+# baseline: no false diff FAILs, and restore does not restart what Jay deliberately quit.
 while (@(Get-OptionsPlusGuiProcesses).Count -gt 0) {
     Write-Banner -Color 'Yellow' -Lines @('GATE W0 (Windows .9): 请先关掉 Options+ 窗口',
-        '在任务栏找到 Logi Options+ 窗口, 点右上角 X 关掉。(脚本不会替你关它。)',
+        '关掉 Options+ 窗口；如果还卡在这里，右下角托盘里右键 Options+ 图标 > 退出。(脚本不会替你关它。)',
         '关掉后在这里按回车重新检查; 输入 abort 回车 = 退出 (什么都没改)。')
     $ans = Read-Host '回车 = 重新检查 / abort'
     if ($ans -and $ans.Trim() -ieq 'abort') { Write-Host 'Aborted at gate W0 - nothing was changed.' -ForegroundColor Yellow; exit 1 }
