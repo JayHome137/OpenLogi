@@ -802,7 +802,7 @@ fn g502_plus_two_failing_entities(request: &[u8]) -> Option<Vec<u8>> {
         // getFwInfo, one entity per index.
         (DEVICE_INFO_INDEX, 0x01) => {
             match request[4] {
-                // Bootloader BOT92.00_B0008, dormant, DFU-mode PID.
+                // Bootloader BOT92.00_B0008, dormant, `0xaaef` in bytes 9-10.
                 0 => payload[..11].copy_from_slice(&[
                     0x01, b'B', b'O', b'T', 0x92, 0x00, 0x00, 0x08, 0x00, 0xaa, 0xef,
                 ]),
@@ -861,13 +861,23 @@ async fn an_entity_the_device_cannot_describe_does_not_stop_the_dump() {
         .expect("an entity the device cannot describe is a row, not a failed dump");
 
     assert_eq!(entities.len(), usize::from(ENTITY_COUNT));
+    // The dormant bootloader's bytes 9 and 10 are carried, but not as a PID:
+    // they are not the PID of the link the request used.
+    let FirmwareEntity::Readable { info, .. } = &entities[0] else {
+        panic!("entity 0 parses: {:?}", entities[0]);
+    };
+    assert_eq!(info.kind, DeviceEntityType::Bootloader);
+    assert_eq!(info.transport_pid, None);
+    assert_eq!(info.transport_specific_info, [0xaa, 0xef, 0, 0, 0, 0, 0]);
+
     let FirmwareEntity::Readable { info, .. } = &entities[1] else {
         panic!("entity 1 parses: {:?}", entities[1]);
     };
     assert_eq!(info.kind, DeviceEntityType::MainApplication);
     assert_eq!(info.prefix, "MPM");
     assert_eq!((info.number, info.revision, info.build), (17, 0, 8));
-    assert_eq!(info.transport_pid, 0xc08d);
+    assert_eq!(info.transport_pid, Some(0xc08d));
+    assert_eq!(info.transport_specific_info, [0xc0, 0x8d, 0, 0, 0, 0, 0]);
     assert!(info.active);
 
     // The Softdevice's binary build is read as a number, not refused.
@@ -1336,7 +1346,8 @@ async fn color_led_effects_shared(
 async fn a_fixed_colour_targets_each_zones_own_fixed_effect() -> Result<(), WriteError> {
     // Zone 0 lists the fixed colour third; zone 1 after an effect id this
     // crate does not model; zone 2 has none, so it is left alone; zone 3 has a
-    // location the parser rejects, so it keeps the legacy index 1.
+    // location the parser rejects, so its list cannot be read and it is left
+    // alone too, although its index 0 holds the fixed colour.
     const ZONES: ScriptedZones = &[
         (0x0001, &[0x0000, 0x0004, 0x0001]),
         (0x0006, &[0x0063, 0x0004, 0x0001]),
@@ -1347,7 +1358,32 @@ async fn a_fixed_colour_targets_each_zones_own_fixed_effect() -> Result<(), Writ
 
     set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await?;
 
-    assert_eq!(zone_effect_writes(&handle), [(0, 2), (1, 2), (3, 1)]);
+    assert_eq!(zone_effect_writes(&handle), [(0, 2), (1, 2)]);
+    Ok(())
+}
+
+#[tokio::test]
+async fn a_fixed_colour_reaches_every_reported_zone() -> Result<(), WriteError> {
+    // Six zones, past the four the writer used to stop at. The fixed colour
+    // sits at a different ordinal in each, so every write must come from that
+    // zone's own list. The keyboard does not answer for a seventh zone, so an
+    // out-of-range request would fail the write.
+    const ZONES: ScriptedZones = &[
+        (0x0001, &[0x0001]),
+        (0x0002, &[0x0000, 0x0001]),
+        (0x0006, &[0x0003, 0x0004, 0x0001]),
+        (0x0007, &[0x0001, 0x0003]),
+        (0x0008, &[0x0000, 0x0003, 0x0004, 0x0001]),
+        (0x0009, &[0x0004, 0x0001]),
+    ];
+    let (shared, handle) = color_led_effects_shared(ZONES).await;
+
+    set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await?;
+
+    assert_eq!(
+        zone_effect_writes(&handle),
+        [(0, 0), (1, 1), (2, 2), (3, 0), (4, 3), (5, 1)]
+    );
     Ok(())
 }
 
@@ -1365,6 +1401,44 @@ async fn a_keyboard_whose_zones_offer_no_fixed_colour_is_not_written() {
             feature_hex: 0x8070
         }),
         "Auto falls through to the next path on this error"
+    );
+    assert!(zone_effect_writes(&handle).is_empty());
+}
+
+#[tokio::test]
+async fn a_keyboard_reporting_no_zones_is_not_written() {
+    // The writer used to guess effect index 1 on zones 0..4 here.
+    let (shared, handle) = color_led_effects_shared(&[]).await;
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8070
+        }),
+        "no zone offers a fixed colour, so Auto falls through"
+    );
+    assert!(zone_effect_writes(&handle).is_empty());
+}
+
+#[tokio::test]
+async fn a_zone_whose_info_is_rejected_is_not_written_with_a_guessed_index() {
+    // The location is one the parser rejects, so the zone's effect list
+    // cannot be read. The writer used to write effect index 1 to it, which
+    // here is a colour wave that would take the RGB bytes as its parameters.
+    const ZONES: ScriptedZones = &[(0x0042, &[0x0003, 0x0004])];
+    let (shared, handle) = color_led_effects_shared(ZONES).await;
+
+    let result =
+        set_keyboard_color_with_on(&shared, LightingMethod::Effects, 0x11, 0x22, 0x33).await;
+
+    assert_eq!(
+        result,
+        Err(WriteError::FeatureUnsupported {
+            feature_hex: 0x8070
+        })
     );
     assert!(zone_effect_writes(&handle).is_empty());
 }

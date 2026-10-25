@@ -60,6 +60,7 @@ mod fn_lock;
 mod light_adoption;
 mod lighting;
 mod os_layout;
+mod pointer_speed;
 mod profile_scope;
 mod reload;
 mod report_rate;

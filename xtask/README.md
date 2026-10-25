@@ -35,8 +35,14 @@ devenv shell -- cargo run -p xtask -- <command>
 - `release checkout-version-bump` — pin a release job to the commit that
   introduced the current workspace version.
 - `release latest-json` — generate the static updater manifest for the stable channel.
-- `release appcast` — sign the macOS DMGs with Sparkle's EdDSA key and write one
-  appcast per architecture.
+- `release appcast` — sign the macOS DMGs and their Sparkle deltas with
+  Sparkle's EdDSA key and write one appcast per architecture.
+- `release sparkle-deltas` — make verified Sparkle deltas from the newest
+  earlier releases to a stapled DMG, with the metadata `release appcast` reads.
+- `release version` — print a release tag's channel, version, build version
+  and the previous tag its release notes compare with as GitHub Actions
+  outputs, after checking the tagged commit's workspace version: the tag's for
+  a stable tag, and the stable release it follows for a beta.
 
 ### Bundle identity
 
@@ -59,6 +65,37 @@ package anything but a production bundle once it is given a signing identity, so
 a dev build cannot reach users. That check is what releases 0.6.24–0.6.26 lacked
 when the release workflow shipped `.dev` identifiers.
 
+`macos package --agent-provisioning-profile` (`OPENLOGI_AGENT_PROVISIONING_PROFILE`)
+takes the agent's Developer ID provisioning profile, which grants
+`com.apple.developer.hid.virtual.device` to `org.openlogi.agent`. It needs
+`--sign-identity`. `bundle/provisioning.rs` checks the profile before the
+build, embeds it as the agent's `Contents/embedded.provisionprofile`, signs the
+agent with exactly the entitlements the virtual HID keyboard needs, and then
+checks that the profile includes the signing certificate. Without a profile,
+the agent claims no entitlements: AMFI kills a process that claims a
+restricted entitlement without its profile. The release workflow reads the
+profile from 1Password (`APPLE_AGENT_PROVISIONING_PROFILE`, base64).
+
+The profile lists the Developer ID Application certificate that signs the
+release. `provisioning.rs` refuses a profile that has expired or that does not
+list the signing certificate, so a stale profile fails the build. The current
+profile expires on 2044-10-15, and its certificate expires on 2031-01-20. When
+either is renewed:
+
+1. In the Apple Developer portal, create a Developer ID profile for the
+   `org.openlogi.agent` App ID with the current Developer ID Application
+   certificate. The App ID must keep the HID Virtual Device capability.
+2. Put the profile's base64 in the `APPLE_AGENT_PROVISIONING_PROFILE` field of
+   the 1Password item that `OP_APPLE_SECRET_ITEM` names.
+3. If the certificate was renewed, update the same item too, because CI
+   imports the certificate separately: `APPLE_CERTIFICATE` (the base64 of the
+   new certificate and private key, exported as PKCS#12),
+   `APPLE_CERTIFICATE_PASSWORD`, and `APPLE_SIGNING_IDENTITY` if the identity
+   name changed.
+4. Before the next release, run a signed build on a branch
+   (`gh workflow run build.yml --ref <branch> -f sign=true`) and check that its
+   macOS jobs pass.
+
 `macos bundle` asks `cargo-bundle` for the base `.app` only, then embeds and signs
 the helpers. Use `macos package` when you need the final DMG. The package command
 also accepts `--target aarch64-apple-darwin` or `--target x86_64-apple-darwin` so
@@ -74,6 +111,10 @@ into `Info.plist`. The feed URL comes from `support/update_feed.rs`: one appcast
 per architecture under `OPENLOGI_UPDATE_BASE_URL`, because each architecture
 ships its own DMG. `release appcast` writes those feeds from the same module,
 so the URL a bundle reads and the file a release uploads cannot drift apart.
+Sparkle orders releases by `CFBundleVersion`, so every bundle carries the
+release's build version there (`--build-version`, from `release version`) and
+the crate version in `CFBundleShortVersionString`. A stable release's build
+version is its version; `support/release_tag.rs` owns the encoding.
 Signing re-signs Sparkle's `Autoupdate`, `Updater.app` and the framework, inside
 out, before the app seals them. Without the key the bundle has no Sparkle and
 the app updates through its built-in engine, which is what every non-release
@@ -126,6 +167,8 @@ xtask/
           embed/tests.rs
           identity.rs          # bundle ids, names, icons per channel
           identity/tests.rs
+          provisioning.rs      # the agent's profile and the HID entitlement it backs
+          provisioning/tests.rs
           signing.rs           # codesign, inside out
           signing/tests.rs
           sparkle.rs           # Sparkle.framework: fetch, embed, Info.plist keys
@@ -158,6 +201,9 @@ xtask/
         checkout_version_bump/tests.rs
         latest_json.rs
         latest_json/tests.rs
+        sparkle_deltas.rs
+        sparkle_deltas/tests.rs
+        version.rs           # a release tag's channel, version and build version
     icon.rs                  # the icon set, and the pipeline a platform implements
     icon/
       macos.rs               # Icon Composer documents -> icns + asset catalog
@@ -165,8 +211,11 @@ xtask/
     support/
       mod.rs
       fs.rs                  # shared filesystem/process guards only
+      github_output.rs       # GitHub Actions step outputs
       info_plist.rs          # reading and stamping plist keys
       manifest.rs            # the root Cargo.toml's [workspace.package]
+      release_tag.rs         # release tag syntax, channel and build version
+      release_tag/tests.rs
       update_feed.rs         # channel, update host and feed URLs packaging and release share
       update_feed/tests.rs
 ```
@@ -174,7 +223,7 @@ xtask/
 Unit tests are a sibling file throughout this crate: `foo.rs` declares
 `#[cfg(test)] mod tests;` and the tests live in `foo/tests.rs`. That keeps a
 module's source to what it does, and the `#[cfg(test)]` on the declaration is
-what carries the `clippy.toml` unwrap/expect exemption into the file — a test
+what carries the Clippy unwrap/expect test exemption into the file — a test
 helper outside any `#[test]` fn still gets it. Note that `include_str!` in such
 a file resolves relative to `foo/`, one level deeper than the module it came
 from.
