@@ -5,9 +5,9 @@ mod inject;
 pub mod uinput;
 
 pub use inject::{
-    HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser, execute,
-    natural_scrolling, post_phased_scroll, post_scroll, post_smooth_scroll, press_hold,
-    release_stuck_modifiers, warp_cursor,
+    DesktopSwitch, HeldChord, SYNTHETIC_EVENT_USER_DATA, SmoothScrollPhase, ax_navigate_browser,
+    execute, natural_scrolling, post_phased_scroll, post_scroll, post_smooth_scroll, press_hold,
+    release_stuck_modifiers, set_desktop_switch, warp_cursor,
 };
 
 #[cfg(target_os = "windows")]
@@ -15,4 +15,4 @@ pub use inject::PhysicalPixelScope;
 #[cfg(target_os = "linux")]
 pub use inject::action_device_path;
 #[cfg(target_os = "macos")]
-pub use inject::prepare_menu_shortcuts;
+pub use inject::{VirtualKeyboard, is_virtual_keyboard_product, prepare_menu_shortcuts};

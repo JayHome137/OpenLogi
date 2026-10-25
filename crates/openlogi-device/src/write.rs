@@ -18,6 +18,7 @@ use crate::channel::route::{DeviceRoute, open_route_channel};
 mod backlight;
 mod diagnostics;
 mod dpi;
+mod dpi_led;
 mod easy_switch;
 mod error;
 mod fn_lock;
@@ -36,15 +37,21 @@ pub use diagnostics::{
     dump_firmware_entities, dump_reprog_controls, read_battery_raw,
 };
 pub use dpi::{
-    Dpi, DpiCapabilities, DpiInfo, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi, set_dpi_on,
+    Dpi, DpiCapabilities, DpiInfo, DpiTarget, get_dpi, get_dpi_info, get_dpi_info_on, set_dpi,
+    set_dpi_on, set_dpi_target_on,
 };
+pub use dpi_led::{DpiLed, set_dpi_led_on};
+pub(crate) use easy_switch::read_name as read_host_friendly_name;
 pub use easy_switch::{
     get_easy_switch_hosts, get_easy_switch_hosts_on, rename_easy_switch_host,
     rename_easy_switch_host_on,
 };
 pub use error::{HidppFeatureErrorKind, HidppOperation, WriteError};
 pub use fn_lock::{get_fn_lock, get_fn_lock_on, set_fn_lock, set_fn_lock_on};
-pub use haptic::{ensure_haptics_armed_on, play_haptic, play_haptic_on};
+pub use haptic::{
+    HapticRestore, HapticRestoreOutcome, ensure_haptics_armed_on, play_haptic, play_haptic_on,
+    restore_haptics_on,
+};
 pub use hidpp::feature::haptic_feedback::HapticWaveform;
 pub use hidpp::feature::multi_platform::OsMask;
 pub use hires_wheel::{
@@ -66,9 +73,12 @@ pub use litra::{
 pub use openlogi_core::hid::{
     EasySwitchHosts, EasySwitchSlot, HostConnection, HostOsInfo, HostOsKind,
 };
-pub use openlogi_core::hid::{ReportRate, ReportRateInfo};
+pub use openlogi_core::hid::{PointerSpeed, ReportRate, ReportRateInfo};
 pub use os_layout::{HostOs, OsLayoutOutcome, OsVersion, keep_os_layout_on};
-pub use pointer_scaling::{PointerScaling, get_pointer_scaling, set_pointer_scaling};
+pub use pointer_scaling::{
+    PointerScaling, get_pointer_scaling, get_pointer_speed_on, set_pointer_scaling,
+    set_pointer_speed_on,
+};
 pub use report_rate::{
     get_report_rate_info, get_report_rate_info_on, set_report_rate, set_report_rate_on,
 };

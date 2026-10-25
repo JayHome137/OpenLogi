@@ -21,9 +21,11 @@ pub mod lock_keys;
 pub mod notices;
 pub mod observable;
 pub mod orchestrator;
+pub mod pointer_speed;
 pub mod receiver_access;
 pub mod runtime;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};
 pub use flow::FlowController;
+pub use pointer_speed::PointerSpeeds;
