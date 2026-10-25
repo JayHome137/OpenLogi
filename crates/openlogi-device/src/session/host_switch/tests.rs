@@ -8,9 +8,9 @@ use tokio::sync::{mpsc, oneshot};
 use super::{
     ArmedControl, HostSwitchError, HostSwitchRestoreOutcome, HostSwitchSessionOutcome,
     HostSwitchStop, HostTable, HostTrigger, KeyboardHosts, KeyboardPosition,
-    PendingHostSwitchRestore, ReportingMode, announced_host, event_host, host_change_required,
-    host_channel, key_trigger, prepare_host_change_on, queued_departure, read_host_count_on,
-    restoration_change, rollback_host_switch_start, run_host_switch_session, shares_channel,
+    PendingHostSwitchRestore, ReportingMode, announced_host, host_change_required, host_channel,
+    key_trigger, prepare_host_change_on, queued_departure, read_host_count_on, restoration_change,
+    rollback_host_switch_start, run_host_switch_session, shares_channel,
 };
 use crate::ChannelPool;
 use crate::backend::NodeId;
