@@ -588,7 +588,10 @@ fn agent_snapshot() {
         lights: Vec::new(),
         flow: FlowStatus::default(),
     };
-    assert_wire(&snapshot, "010001010705302e362e36010000000000000000000000");
+    assert_wire(
+        &snapshot,
+        "010001010705302e362e360100000000000000000000000000",
+    );
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
@@ -597,7 +600,7 @@ fn agent_snapshot() {
     };
     assert_wire(
         &observed,
-        "03010001010705302e362e36010000000000000000000000",
+        "03010001010705302e362e360100000000000000000000000000",
     );
 }
 
