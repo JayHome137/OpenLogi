@@ -284,9 +284,24 @@ impl Runtime {
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }
+            ipc::GuiUpdate::PairingCancelled => {
+                cx.update(windows::add_device::apply_cancelled);
+            }
             ipc::GuiUpdate::ConfigReloadResult(result) => {
                 cx.update(|cx| {
                     AppState::apply(cx, |state| state.apply_config_reload_result(result));
+                });
+            }
+            ipc::GuiUpdate::DpiWritten {
+                key,
+                write,
+                dpi,
+                result,
+            } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| {
+                        state.apply_dpi_written(&key, write, dpi, result)
+                    });
                 });
             }
             ipc::GuiUpdate::FnLockWritten { key, result } => {
@@ -299,6 +314,11 @@ impl Runtime {
                     AppState::apply(cx, |state| {
                         state.apply_report_rate_written(&key, &route, result)
                     });
+                });
+            }
+            ipc::GuiUpdate::PointerSpeedWritten { key, result } => {
+                cx.update(|cx| {
+                    AppState::apply(cx, |state| state.apply_pointer_speed_written(&key, result));
                 });
             }
             ipc::GuiUpdate::BacklightWritten {

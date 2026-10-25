@@ -57,8 +57,8 @@ use openlogi_core::single_instance::{self, InstanceError, Role};
 use openlogi_fixture::{DeviceProfile, FixtureError, ProfileDeviceSettings, ProfileSetting};
 use openlogi_hid::{
     BacklightChange, BacklightState, DeviceRoute, Dpi, DpiInfo, EasySwitchHosts, FnLockState,
-    LightCommand, PasskeyMethod, ReceiverSelector, ReportRate, ReportRateInfo, ScrollWheelMode,
-    SmartShiftStatus, WriteError,
+    LightCommand, PasskeyMethod, PointerSpeed, ReceiverSelector, ReportRate, ReportRateInfo,
+    ScrollWheelMode, SmartShiftStatus, WriteError,
 };
 use openlogi_ipc::transport;
 use openlogi_ipc::{
@@ -696,6 +696,8 @@ fn agent_status() -> AgentStatus {
         agent_version: concat!(env!("CARGO_PKG_VERSION"), "-mock").to_string(),
         input_monitoring_granted: true,
         hid_open_failures: false,
+        secure_input: openlogi_ipc::SecureInput::Off,
+        virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
     }
 }
 
@@ -952,6 +954,27 @@ impl Agent for MockAgent {
         stored.current = rate;
         info!(%route, %rate, "set_report_rate");
         Ok(stored.clone())
+    }
+    async fn read_pointer_speed(
+        self,
+        _: Context,
+        route: DeviceRoute,
+    ) -> Result<PointerSpeed, WriteError> {
+        let state = self.state.lock().await;
+        profile_value(&state.settings_for(&route)?.pointer_speed, &route, 0x2205).copied()
+    }
+    async fn set_pointer_speed(
+        self,
+        _: Context,
+        route: DeviceRoute,
+        speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError> {
+        let mut state = self.state.lock().await;
+        let settings = state.settings_for_mut(&route)?;
+        let stored = profile_value_mut(&mut settings.pointer_speed, &route, 0x2205)?;
+        *stored = speed;
+        info!(%route, %speed, "set_pointer_speed");
+        Ok(speed)
     }
     async fn set_backlight(
         self,

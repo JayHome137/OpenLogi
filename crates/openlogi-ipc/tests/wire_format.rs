@@ -54,7 +54,7 @@ use openlogi_ipc::{
     ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
     MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation, ObservedLight,
     PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig,
+    RingObservation, SavedConfig, SecureInput, VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
 
@@ -110,7 +110,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 37);
+    assert_eq!(PROTOCOL_VERSION, 39);
 }
 
 #[test]
@@ -515,12 +515,24 @@ fn agent_status() {
         agent_version: "0.6.6".into(),
         input_monitoring_granted: true,
         hid_open_failures: false,
+        secure_input: SecureInput::On(Some(ForegroundApp {
+            id: "a".into(),
+            display_name: "A".into(),
+        })),
+        virtual_keyboard: VirtualKeyboardStatus::Active,
     };
-    assert_wire(&status, "010001010705302e362e360100");
+    assert_wire(&status, "010001010705302e362e36010001010161014102");
 
     assert_wire(&InventoryHealth::Scanning, "00");
     assert_wire(&InventoryHealth::Ready, "01");
     assert_wire(&InventoryHealth::Unavailable, "02");
+
+    assert_wire(&SecureInput::Off, "00");
+    assert_wire(&SecureInput::On(None), "0100");
+
+    assert_wire(&VirtualKeyboardStatus::Unsupported, "00");
+    assert_wire(&VirtualKeyboardStatus::Unavailable, "01");
+    assert_wire(&VirtualKeyboardStatus::Active, "02");
 }
 
 #[test]
@@ -535,6 +547,8 @@ fn agent_snapshot() {
             agent_version: "0.6.6".into(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            secure_input: SecureInput::Off,
+            virtual_keyboard: VirtualKeyboardStatus::Unsupported,
         },
         inventory: Vec::new(),
         standalone: Vec::new(),
@@ -546,14 +560,14 @@ fn agent_snapshot() {
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
     };
-    assert_wire(&snapshot, "010001010705302e362e36010000000000000000");
+    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e36010000000000000000");
+    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:
@@ -657,13 +671,14 @@ fn device_inventory() {
                 backlight: true,
                 easy_switch: true,
                 virtual_thumbwheel: true,
+                pointer_scaling: true,
             }),
             settings_revision: 7,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010107",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b010101000001010101010001010101010107",
     );
 }
 
@@ -772,6 +787,14 @@ fn device_settings_payloads() {
     assert_wire(
         &ReceiverSelector::BoltUid("F00DCAFE".into()),
         "01084630304443414645",
+    );
+    assert_wire(&ReceiverSelector::First, "00");
+    assert_wire(
+        &ReceiverSelector::ReceiverUid {
+            product_id: 0xc548,
+            uid: "F00DCAFE".into(),
+        },
+        "02fb48c5084630304443414645",
     );
 }
 
@@ -975,6 +998,7 @@ fn easy_switch_hosts_and_errors() {
     );
     assert_wire(&HidppOperation::ReadHosts, "15");
     assert_wire(&HidppOperation::RenameHost, "16");
+    assert_wire(&HidppOperation::WriteLed, "17");
     assert_wire(&WriteError::HostRenameUnsupported, "16");
     assert_wire(&WriteError::HostSlotEmpty { slot: 2 }, "1702");
     assert_wire(&WriteError::HostNameRejected { max_len: 24 }, "1818");
@@ -1034,4 +1058,19 @@ fn report_rate_dtos_and_errors() {
         },
         "fbe803037dfbf401fbe803",
     );
+}
+
+#[test]
+fn pointer_speed_and_precision_mode() {
+    use openlogi_core::binding::Action;
+    use openlogi_core::hid::PointerSpeed;
+    // The 1/256 factor as a varint: 0.125× fits one byte, 3× takes three.
+    assert_wire(&PointerSpeed::MIN, "20");
+    assert_wire(&PointerSpeed::MAX, "fb0003");
+    assert_wire(
+        &Ok::<PointerSpeed, WriteError>(PointerSpeed::DEFAULT),
+        "00fb0001",
+    );
+    // Appended at the end of `Action`, so every earlier index is unchanged.
+    assert_wire(&Action::TogglePrecisionMode, "36");
 }

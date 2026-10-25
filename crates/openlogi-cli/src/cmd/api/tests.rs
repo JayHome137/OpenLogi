@@ -31,6 +31,8 @@ fn snapshot() -> AgentSnapshot {
             agent_version: "test-agent".into(),
             input_monitoring_granted: true,
             hid_open_failures: false,
+            secure_input: openlogi_ipc::SecureInput::Off,
+            virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
         },
         inventory: vec![DeviceInventory {
             receiver: ReceiverInfo {
@@ -203,6 +205,7 @@ async fn status_has_a_separate_explicit_json_contract() {
             "agent_version": "test-agent", "inventory": "ready",
             "accessibility_granted": false, "input_monitoring_granted": true,
             "hook_installed": false, "hid_open_failures": false, "launch_at_login": true,
+            "virtual_keyboard": "unsupported",
         })
     );
 }

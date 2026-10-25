@@ -41,8 +41,8 @@
 use std::time::{Duration, Instant};
 
 use openlogi_core::hid::{
-    BacklightState, DeviceRoute, EasySwitchHosts, FnLockState, LightCommand, ReportRateInfo,
-    WriteError,
+    BacklightState, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, LightCommand, PointerSpeed,
+    ReportRateInfo, WriteError,
 };
 use openlogi_ipc::SavedConfig;
 use openlogi_ipc::client::{self, ConnectError};
@@ -67,9 +67,10 @@ use request::LinkLost;
 pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts,
-    ReadFnLock, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
-    RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower,
-    SetLighting, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
+    ReadFnLock, ReadPointerSpeed, ReadReportRate, ReadSmartShift, ReloadConfig,
+    RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight,
+    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
+    UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
@@ -104,6 +105,18 @@ pub enum GuiUpdate {
     },
     /// Whether the agent adopted the config currently on disk.
     ConfigReloadResult(Result<(), ConfigReloadError>),
+    /// The device's verdict on a DPI write the GUI asked for: taken, or the
+    /// typed refusal. Answers [`SetDpi`].
+    DpiWritten {
+        /// The device that was written.
+        key: DeviceKey,
+        /// Which write this answers: [`SetDpi::write`].
+        write: u64,
+        /// The DPI that was written.
+        dpi: Dpi,
+        /// `Ok` once the device took `dpi`, or why it did not.
+        result: Result<(), WriteError>,
+    },
     /// What a keyboard reports after an Fn-lock write the GUI asked for: the
     /// state it took, or the typed refusal. Answers [`SetFnLock`].
     FnLockWritten {
@@ -122,6 +135,14 @@ pub enum GuiUpdate {
         route: DeviceRoute,
         /// The read-back, or why the write did not land.
         result: Result<ReportRateInfo, WriteError>,
+    },
+    /// What a mouse reports after a pointer-speed write the GUI asked for:
+    /// the speed it took, or the typed refusal. Answers [`SetPointerSpeed`].
+    PointerSpeedWritten {
+        /// The mouse that was written.
+        key: DeviceKey,
+        /// The read-back, or why the write did not land.
+        result: Result<PointerSpeed, WriteError>,
     },
     /// What a keyboard reports after a backlight change the GUI asked for:
     /// the backlight it reads back, or the typed refusal. Answers
@@ -155,6 +176,8 @@ pub enum GuiUpdate {
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
+    /// Cancellation completed and the receiver is available for a new choice.
+    PairingCancelled,
     /// Whether the receiver let a pairing go. Answers [`UnpairDevice`].
     DeviceUnpaired {
         /// The pairing the receiver was asked to drop.
@@ -285,9 +308,13 @@ async fn observe_loop(
             Woken::Command(Some(Command::ReloadConfig(reload))) => owed.save(reload),
             Woken::Command(Some(Command::LoadConfig(_))) => owed.load = true,
             Woken::Command(Some(cmd)) => {
+                let pairing_transition =
+                    matches!(cmd, Command::StartPairing(_) | Command::CancelPairing(_));
                 let client = link.ensure(effects, update_tx).await;
                 if cmd.run(client, update_tx).await.is_err() {
                     link.lose(Instant::now());
+                } else if pairing_transition {
+                    link.refresh_state();
                 }
             }
             Woken::Reconnect => {
@@ -801,6 +828,8 @@ mod tests {
                 agent_version: "observe-loop-test".to_owned(),
                 input_monitoring_granted: true,
                 hid_open_failures: false,
+                secure_input: openlogi_ipc::SecureInput::Off,
+                virtual_keyboard: openlogi_ipc::VirtualKeyboardStatus::Unsupported,
             },
             inventory: Vec::new(),
             standalone: Vec::new(),
@@ -808,6 +837,67 @@ mod tests {
             pairing: None,
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn cancellation_discards_an_observation_buffered_before_cleanup() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let old_started = Arc::new(tokio::sync::Notify::new());
+        let release_old = Arc::new(tokio::sync::Notify::new());
+        let old_answered = Arc::new(tokio::sync::Notify::new());
+        let started = old_started.clone();
+        let agent = in_memory_agent(
+            move |request| {
+                let calls = calls.clone();
+                let started = started.clone();
+                let release = release_old.clone();
+                let answered = old_answered.clone();
+                Box::pin(async move {
+                    match request {
+                        AgentRequest::Observe { .. } => {
+                            let call = calls.fetch_add(1, Ordering::SeqCst);
+                            if call > 2 {
+                                return std::future::pending().await;
+                            }
+                            let mut state = snapshot(false);
+                            if call < 2 {
+                                state.pairing = Some(openlogi_ipc::PairingPhase::Searching);
+                            }
+                            if call == 1 {
+                                started.notify_one();
+                                release.notified().await;
+                                answered.notify_one();
+                            }
+                            Ok(AgentResponse::Observe(Observation {
+                                generation: call as u64 + 1,
+                                snapshot: state,
+                            }))
+                        }
+                        AgentRequest::CancelPairing {} => {
+                            release.notify_one();
+                            answered.notified().await;
+                            Ok(AgentResponse::CancelPairing(Ok(())))
+                        }
+                        other => panic!("unexpected request: {other:?}"),
+                    }
+                })
+            },
+            std::future::pending(),
+        );
+        let mut effects = ScriptedEffects::answering([Ok(agent)]);
+        let (update_tx, mut updates) = mpsc::unbounded_channel();
+        let (commands, mut cmd_rx) = mpsc::unbounded_channel();
+        tokio::select! {
+            () = observe_loop(&mut effects, &update_tx, &mut cmd_rx) => panic!("client stopped"),
+            () = async {
+                assert!(matches!(updates.recv().await, Some(GuiUpdate::Snapshot(_))));
+                old_started.notified().await;
+                commands.send(CancelPairing.into()).unwrap();
+                assert!(matches!(updates.recv().await, Some(GuiUpdate::PairingCancelled)));
+                let Some(GuiUpdate::Snapshot(current)) = updates.recv().await else { panic!("expected current state"); };
+                assert_eq!(current.pairing, None, "a stale active phase must not replace cancellation completion");
+            } => {}
         }
     }
 

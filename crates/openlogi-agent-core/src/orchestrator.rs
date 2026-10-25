@@ -12,13 +12,13 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError, RwLock};
 
 use openlogi_core::app::ForegroundApp;
 use openlogi_core::binding::{Binding, ButtonId};
 use openlogi_core::bindings::{button_bindings_for, oshook_gestures_for};
 use openlogi_core::config::{
-    Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
+    AppSettings, Config, ConfigRevision, LightSettings, MouseProfileTarget, canonical_device_key,
 };
 use openlogi_core::device::{
     BatteryInfo, Capabilities, ChangedOnLight, DeviceInventory, DeviceKind, LightCapabilities,
@@ -27,8 +27,9 @@ use openlogi_core::device::{
 use openlogi_core::device_order::{DeviceIdentity, PhysicalDeviceKey};
 use openlogi_hid::{
     BacklightChange, BacklightState, CaptureChannelSlot, ChannelPool, ChannelRegistry,
-    DeviceIoGate, DeviceRoute, EasySwitchHosts, FnLockState, HidppOperation, HostOs, ReportRate,
-    ReportRateInfo, WriteError, commands_for_light_settings, is_reserved_keyboard_control,
+    DeviceIoGate, DeviceRoute, Dpi, EasySwitchHosts, FnLockState, HidppOperation, HostOs,
+    PointerSpeed, ReportRate, ReportRateInfo, WriteError, commands_for_light_settings,
+    is_reserved_keyboard_control,
 };
 #[cfg(test)]
 use openlogi_ipc::ChosenLight;
@@ -42,9 +43,11 @@ use crate::capture_plan::{
 };
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
+    show_precision_led, write_pointer_speed_in_background,
 };
 use crate::notices::LowBatteryWatch;
 use crate::observable::ObservableState;
+use crate::pointer_speed::{AppWrite, ReloadChange, SavedSpeed, SpeedMouse, SpeedWrite};
 use crate::receiver_access::ReceiverAccess;
 use crate::runtime::hook::{HookMaps, SharedHookMaps};
 use crate::runtime::scroll::ScrollPreferences;
@@ -52,7 +55,7 @@ use crate::watchers::host_switch::{HostSwitchLink, HostSwitchLinks};
 use crate::watchers::inventory::InventoryRefresh;
 use crate::watchers::keyboard::{KeyboardSpec, SharedKeyboardSpec};
 use crate::watchers::light::{WatchedLight, WatchedLights};
-use crate::{DpiCycleState, DpiCycles};
+use crate::{DpiCycleState, DpiCycles, PointerSpeeds};
 
 mod devices;
 mod lights;
@@ -62,11 +65,13 @@ pub use lights::{ConfigSource, LightWriteClaim, TakenLightChange, write_light};
 #[cfg(test)]
 use devices::reapply_targets;
 use devices::{
-    RECONNECT_REAPPLY_CONFIRM_RETRIES, VOLATILE_REAPPLY_CONFIRM_RETRIES,
-    any_device_needs_capture_rearm, build_devices, config_keeps_os_layout, configured_report_rate,
-    configured_wheel_mode, host_switch_links, is_hidpp_device, keeps_os_layout, main_wheel_divert,
-    newly_kept_os_layouts, os_layout_appeared, pick_current, plan_reapply, settings_moved,
-    stable_id, wheel_inverted,
+    FollowerCookieState, FollowerCookieWrite, RECONNECT_REAPPLY_CONFIRM_RETRIES,
+    VOLATILE_REAPPLY_CONFIRM_RETRIES, any_device_needs_capture_rearm, assignments_changed,
+    build_devices, changed_follower_cookies, config_keeps_os_layout, configured_dpi,
+    configured_report_rate, configured_wheel_mode, host_switch_links, is_hidpp_device,
+    keeps_os_layout, main_wheel_divert, newly_kept_os_layouts, os_layout_appeared, pick_current,
+    plan_reapply, reconnect_follower_cookies, saved_speed, settings_moved, stable_id,
+    wheel_inverted,
 };
 
 /// The minimal per-device facts the agent needs: the config key (binding /
@@ -156,10 +161,15 @@ pub struct SharedHandles {
     /// Orders the GUI's report-rate writes and the reconnect reapply's per
     /// mouse.
     report_rate_order: WriteOrder,
+    /// Precision mode of the mice whose speed `0x2205` scales, and the order
+    /// of every path's pointer-speed writes.
+    pointer_speeds: Arc<PointerSpeeds>,
     /// Orders the GUI's backlight writes per keyboard.
     backlight_order: WriteOrder,
     /// Orders host renames per device.
     host_name_order: WriteOrder,
+    /// Orders the `ChangeHost` cookie writes per linked device.
+    follower_cookie_order: WriteOrder,
     /// The running inventory watcher's refresh handle, published at arming;
     /// `None` while no watcher runs.
     inventory_refresh: Arc<RwLock<Option<InventoryRefresh>>>,
@@ -259,6 +269,74 @@ impl SharedHandles {
                 &ticket,
                 |c| async move { openlogi_hid::set_report_rate_on(&c, rate).await },
                 |c| async move { openlogi_hid::get_report_rate_info_on(&c).await },
+            )
+            .await
+    }
+
+    /// The precision-mode state the action runtime toggles.
+    #[must_use]
+    pub fn pointer_speeds(&self) -> Arc<PointerSpeeds> {
+        Arc::clone(&self.pointer_speeds)
+    }
+
+    /// Write `speed` to the mouse at `route` and return what it reads back.
+    /// The write ends the mouse's precision mode, so the pointer moves at the
+    /// speed the settings app shows, and darkens the DPI LED when the
+    /// precision speed ends with it. It is ordered with the precision button
+    /// and the reconnect reapply as [`Self::set_report_rate`] is ordered:
+    /// a write superseded before its turn reads the mouse instead.
+    pub async fn set_pointer_speed(
+        &self,
+        route: &DeviceRoute,
+        speed: PointerSpeed,
+    ) -> Result<PointerSpeed, WriteError> {
+        let AppWrite { ticket, restore } = self
+            .pointer_speeds
+            .app_write(route, SavedSpeed::Scaled(Some(speed)));
+        let speeds = Arc::clone(&self.pointer_speeds);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WritePointerScaling,
+                &ticket,
+                |c| async move {
+                    let started = tokio::time::Instant::now();
+                    let applied = openlogi_hid::set_pointer_speed_on(&c, speed).await?;
+                    if let Some(restore) = restore {
+                        show_precision_led(&c, false, started).await;
+                        speeds.restored(&restore);
+                    }
+                    Ok(applied)
+                },
+                |c| async move { openlogi_hid::get_pointer_speed_on(&c).await },
+            )
+            .await
+    }
+
+    /// Write `dpi` to the mouse at `route`. On a DPI mouse the write ends
+    /// precision mode, so the pointer moves at the DPI the settings app
+    /// shows, and darkens the DPI LED when the precision speed ends with it.
+    /// It is ordered with the precision button, the DPI preset actions and
+    /// the reconnect reapply. A write superseded before its turn writes
+    /// nothing.
+    pub async fn set_dpi(&self, route: &DeviceRoute, dpi: Dpi) -> Result<(), WriteError> {
+        let AppWrite { ticket, restore } = self
+            .pointer_speeds
+            .app_write(route, SavedSpeed::Dpi(Some(dpi)));
+        let speeds = Arc::clone(&self.pointer_speeds);
+        self.device(route)
+            .run_in_turn(
+                HidppOperation::WriteDpi,
+                &ticket,
+                |c| async move {
+                    let started = tokio::time::Instant::now();
+                    openlogi_hid::set_dpi_on(&c, dpi).await?;
+                    if let Some(restore) = restore {
+                        show_precision_led(&c, false, started).await;
+                        speeds.restored(&restore);
+                    }
+                    Ok(())
+                },
+                |_| async { Ok(()) },
             )
             .await
     }
@@ -386,6 +464,10 @@ pub struct Orchestrator {
     /// layout writes queued for them so a write withdraws itself once a
     /// reload turns the setting off or disables the device.
     kept_os_layouts: Arc<KeptOsLayouts>,
+    /// The cookie clears that wait for their linked device to be online, and
+    /// the last cookie byte seen for each keyboard. Shared with the cookie
+    /// writes, which return a clear that does not finish.
+    follower_cookies: Arc<Mutex<FollowerCookieState>>,
     /// Whether the OS mouse hook is currently installed. Back/Forward gesture
     /// motion comes from HID++, but diversion is published only while the
     /// broader mouse-remapping path is available so losing the hook leaves the
@@ -446,6 +528,7 @@ impl Orchestrator {
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
+        openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
             channel_pool: hardware.channel_pool(),
@@ -469,8 +552,10 @@ impl Orchestrator {
             watched_lights,
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
+            pointer_speeds: Arc::default(),
             backlight_order: WriteOrder::default(),
             host_name_order: WriteOrder::default(),
+            follower_cookie_order: WriteOrder::default(),
             inventory_refresh: Arc::new(RwLock::new(None)),
         };
         let orch = Self {
@@ -493,6 +578,7 @@ impl Orchestrator {
             light_writes: BTreeMap::new(),
             next_light_write: 0,
             kept_os_layouts: Arc::default(),
+            follower_cookies: Arc::default(),
             os_mouse_hook_available: false,
             capture_plans_tx,
             keyboard_spec_tx,
@@ -704,6 +790,7 @@ impl Orchestrator {
     fn publish_device_runtime(&self) {
         self.publish_capture_plans();
         self.rebuild_dpi_cycles(self.current_key());
+        self.publish_pointer_speeds(self.current_key());
         // Keyboard F-key bindings are global (not per-device), so they key off
         // the top-level config map rather than the selected device. Published
         // here so `reload_config` (GUI commit) takes effect live, not only on
@@ -761,6 +848,29 @@ impl Orchestrator {
         }
         guard.selected = selected.map(str::to_owned);
         guard.by_key = by_key;
+    }
+
+    /// Publish every online, enabled mouse whose speed OpenLogi sets, for
+    /// the precision button. The precision mode of each mouse is kept.
+    fn publish_pointer_speeds(&self, selected: Option<&str>) {
+        self.shared
+            .pointer_speeds
+            .publish(selected, self.speed_mice());
+    }
+
+    /// Every online, enabled mouse whose speed OpenLogi sets, with how it
+    /// sets it and the value saved for it.
+    fn speed_mice(&self) -> impl Iterator<Item = SpeedMouse> + '_ {
+        self.devices
+            .iter()
+            .filter(|dev| dev.online && self.config.device_enabled(&dev.config_key))
+            .filter_map(|dev| {
+                Some(SpeedMouse {
+                    key: dev.config_key.clone(),
+                    route: dev.route.clone()?,
+                    saved: saved_speed(&self.config, dev)?,
+                })
+            })
     }
 
     /// Capture plans for enabled devices, and a route for every online device.
@@ -869,6 +979,9 @@ impl Orchestrator {
         self.publish_inventory();
         let devices = build_devices(&self.config, inventories, standalone);
         self.announce_low_batteries(&devices);
+        // Before any cookie plan below: a keyboard that goes to sleep or
+        // leaves later keeps its byte for the clears and links that name it.
+        self.follower_cookies().remember_leads(&devices);
         // Volatile settings (lighting colour, sensor DPI, SmartShift, native
         // wheel mode) live in device RAM and reset on a power cycle. Every
         // reconnect shape re-applies the persisted values (#189): a first
@@ -897,7 +1010,7 @@ impl Orchestrator {
             }
         }
         for idx in targets {
-            self.reapply_volatile_settings(&devices[idx]);
+            self.reapply_volatile_settings(&devices[idx], &devices);
         }
         let changed = next_current != self.current
             || devices.len() != self.devices.len()
@@ -1023,7 +1136,12 @@ impl Orchestrator {
     /// thread and one HID++ channel so concurrent multi-open of the same
     /// receiver cannot cross-talk (#485); lighting stays a separate path
     /// (keyboards / different feature).
-    fn reapply_volatile_settings(&self, dev: &AgentDevice) {
+    ///
+    /// `devices` is the inventory that `dev` comes from. The cookie plan reads
+    /// it, not `self.devices`, which still holds the previous inventory while
+    /// [`Self::refresh_inventory`] runs: there `dev` and the keyboards that
+    /// came online with it would still look offline.
+    fn reapply_volatile_settings(&self, dev: &AgentDevice, devices: &[AgentDevice]) {
         // A disabled device is left fully native — no writes of any kind.
         if !self.config.device_enabled(&dev.config_key) {
             return;
@@ -1034,9 +1152,18 @@ impl Orchestrator {
         let key = &dev.config_key;
         let route_key = stable_id(dev).route_key();
         let device = self.config.devices.get(key.as_str());
+        let saved = saved_speed(&self.config, dev);
+        let speed_write =
+            saved.and_then(|saved| self.shared.pointer_speeds.reapply(key, &route, saved));
+        // A DPI mouse gets its DPI from `speed_write`, numbered with the
+        // precision presses and the settings-app writes, so a newer one
+        // supersedes it. The volatile reapply leaves the DPI out then.
+        let dpi_overridden = matches!(saved, Some(SavedSpeed::Dpi(_))) && speed_write.is_some();
         let settings = VolatileMouseSettings {
             wheel: self.wheel_mode_change(dev),
-            dpi: device.and_then(|d| d.effective_dpi(&route_key)),
+            dpi: device
+                .and_then(|d| d.effective_dpi(&route_key))
+                .filter(|_| !dpi_overridden),
             report_rate: configured_report_rate(&self.config, dev),
             smartshift: device
                 .and_then(|d| d.effective_smartshift(&route_key))
@@ -1059,6 +1186,9 @@ impl Orchestrator {
         if let Some(fn_lock) = self.config.fn_lock(key) {
             self.shared.write_fn_lock_in_background(&route, fn_lock);
         }
+        if let Some(write) = speed_write {
+            self.write_pointer_speed(write);
+        }
         self.keep_os_layout(dev);
         if let Some(capabilities) = dev.light_capabilities
             && let Some(light) = self.effective_light_settings(key)
@@ -1067,6 +1197,38 @@ impl Orchestrator {
                 .hardware
                 .set_light_in_background(Some(route), &light, capabilities);
         }
+        let writes =
+            reconnect_follower_cookies(&self.config, devices, dev, &mut self.follower_cookies());
+        self.write_follower_cookies(writes);
+    }
+
+    /// Write the `ChangeHost` cookies of linked pointing devices, so that Logi
+    /// Options+ on a keyboard's other hosts moves the same devices.
+    fn write_follower_cookies(&self, writes: Vec<FollowerCookieWrite>) {
+        for write in writes {
+            let state = Arc::clone(&self.follower_cookies);
+            let key = write.key;
+            crate::hardware::write_follower_cookies_in_background(
+                self.shared.device(&write.follower),
+                self.shared.follower_cookie_order.request(&write.follower),
+                write.release,
+                write.link,
+                move |leads| {
+                    state
+                        .lock()
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .requeue(&key, leads);
+                },
+            );
+        }
+    }
+
+    /// The held cookie clears and the known keyboard bytes. A panic while the
+    /// state was held leaves at worst a clear too many or too few.
+    fn follower_cookies(&self) -> MutexGuard<'_, FollowerCookieState> {
+        self.follower_cookies
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Put `dev`'s keyboard on the host OS's key layout when the config keeps
@@ -1226,7 +1388,7 @@ impl Orchestrator {
         if !ring.enabled {
             return None;
         }
-        let layout = ring.effective_layout(self.current_app.as_deref());
+        let layout = ring.effective_layout(&self.config.apps, self.current_app.as_deref());
         if layout.slots.is_empty() {
             return None;
         }
@@ -1410,6 +1572,7 @@ impl Orchestrator {
             self.config.app_settings.smooth_scroll,
             self.config.app_settings.vertical_scroll_sensitivity,
         );
+        openlogi_inject::set_desktop_switch(desktop_switch(&self.config.app_settings));
         self.observable
             .set_launch_at_login(self.config.app_settings.launch_at_login);
         let retained_overrides: HashSet<String> = self
@@ -1428,7 +1591,15 @@ impl Orchestrator {
         self.rebuild();
         self.apply_native_wheel_modes();
         self.apply_changed_fn_locks(&previous);
+        self.apply_changed_pointer_speeds(&previous);
         self.apply_enabled_os_layouts(&previous);
+        let writes = changed_follower_cookies(
+            &previous,
+            &self.config,
+            &self.devices,
+            &mut self.follower_cookies(),
+        );
+        self.write_follower_cookies(writes);
         self.changed_lights(&previous_lights)
     }
 
@@ -1464,6 +1635,51 @@ impl Orchestrator {
                 self.shared.write_fn_lock_in_background(&route, fn_lock);
             }
         }
+    }
+
+    /// End precision mode on every mouse whose speed, DPI or button
+    /// assignments the reload changed, online or not, and push the resulting
+    /// speed to the online ones (see [`crate::pointer_speed`]). An unrelated
+    /// save writes nothing, as for [`Self::apply_changed_fn_locks`].
+    fn apply_changed_pointer_speeds(&self, previous: &Config) {
+        // A DPI is saved per link, so it is compared for the link each known
+        // mouse is on.
+        let dpi_changed: HashSet<&str> = self
+            .devices
+            .iter()
+            .filter(|dev| configured_dpi(previous, dev) != configured_dpi(&self.config, dev))
+            .map(|dev| dev.config_key.as_str())
+            .collect();
+        let change = |key: &str| ReloadChange {
+            speed: self.config.pointer_speed(key) != previous.pointer_speed(key)
+                || dpi_changed.contains(key),
+            assignments: assignments_changed(previous, &self.config, key),
+        };
+        for write in self.shared.pointer_speeds.reload(change, self.speed_mice()) {
+            self.write_pointer_speed(write);
+        }
+    }
+
+    fn write_pointer_speed(&self, write: SpeedWrite) {
+        let SpeedWrite {
+            route,
+            target,
+            ticket,
+            restore,
+            led,
+        } = write;
+        let speeds = Arc::clone(&self.shared.pointer_speeds);
+        write_pointer_speed_in_background(
+            self.shared.device(&route),
+            ticket,
+            target,
+            led,
+            move || {
+                if let Some(restore) = restore {
+                    speeds.restored(&restore);
+                }
+            },
+        );
     }
 
     /// The effective settings of every online standalone light, keyed by its
@@ -1517,6 +1733,15 @@ struct LightWrite {
     route: DeviceRoute,
     light: LightSettings,
     capabilities: LightCapabilities,
+}
+
+/// How Previous and Next Desktop switch under `settings`.
+fn desktop_switch(settings: &AppSettings) -> openlogi_inject::DesktopSwitch {
+    if settings.animate_desktop_switch {
+        openlogi_inject::DesktopSwitch::Animated
+    } else {
+        openlogi_inject::DesktopSwitch::Instant
+    }
 }
 
 /// Replace the value behind an `RwLock`, logging (not panicking) on poison so a
