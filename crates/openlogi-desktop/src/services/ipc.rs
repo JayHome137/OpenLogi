@@ -71,9 +71,8 @@ pub use request::{
     CancelPairing, Command, FlowPairCancel, FlowPairConfirm, FlowPairListen, FlowPairReject,
     FlowPairStart, LoadConfig, PairDevice, ReadBacklight, ReadDpi, ReadEasySwitchHosts, ReadFnLock,
     ReadPointerSpeed, ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost,
-    RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight,
-    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
-    UnpairDevice,
+    RequestAccessibilityPrompt, SetBacklight, SetDpi, SetFnLock, SetLight, SetLightManualPower,
+    SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
 };
 
 /// How long to wait before retrying a connect that failed. This is a retry
