@@ -26,6 +26,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Resolve latest upstream release source
         id: release
         env:
@@ -45,7 +48,7 @@ jobs:
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "Latest upstream release source: $tag ($sha). No release assets are downloaded." >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Rebuild master from the release tag
+      - name: Merge the release source into master
         id: promote
         env:
           RELEASE_TAG: ${{ steps.release.outputs.tag }}
@@ -56,27 +59,47 @@ jobs:
           set -euo pipefail
           git fetch --no-tags origin master
           old="$(git rev-parse refs/remotes/origin/master)"
-          git checkout --detach "$UPSTREAM_SHA"
-          git restore --source="$WORKFLOW_SHA" --staged --worktree -- .github/workflows/upstream-sync.yml
+          git switch --force-create master origin/master
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if ! git merge-base --is-ancestor "$UPSTREAM_SHA" HEAD; then
+            if ! git merge --no-edit --no-ff "$UPSTREAM_SHA"; then
+              conflicts="$(git diff --name-only --diff-filter=U || true)"
+              git merge --abort || true
+              {
+                echo "## Upstream release source needs conflict review"
+                echo
+                echo "master was left unchanged because release source $RELEASE_TAG ($UPSTREAM_SHA) conflicts with these paths:"
+                echo
+                echo '```text'
+                echo "$conflicts"
+                echo '```'
+              } >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          fi
+          git restore --source="$WORKFLOW_SHA" --staged --worktree -- .github/workflows/upstream-sync.yml
+          cargo update -p rustls-webpki -p tokio -p webpki-root-certs -p webpki-roots
+          git add .github/workflows/upstream-sync.yml
+          git add Cargo.lock
           if ! git diff --cached --quiet; then
-            git commit -m "ci(fork): anchor master to latest upstream release"
+            git commit -m "ci(fork): sync latest upstream release source"
           fi
           candidate="$(git rev-parse HEAD)"
 
-          if [ "$old" = "$candidate" ] || {
-            [ "$(git rev-parse "$old^{tree}")" = "$(git rev-parse "$candidate^{tree}")" ] &&
-            [ "$(git rev-parse "$old^" 2>/dev/null || true)" = "$UPSTREAM_SHA" ];
-          }; then
+          if [ "$old" = "$candidate" ]; then
             echo "changed=false" >> "$GITHUB_OUTPUT"
             echo "master already matches release source $RELEASE_TAG ($UPSTREAM_SHA) plus the sync workflow." >> "$GITHUB_STEP_SUMMARY"
           else
-            git push --force-with-lease="refs/heads/master:$old" \
+            if ! git merge-base --is-ancestor "$old" "$candidate"; then
+              echo "master cannot advance to release source $RELEASE_TAG without rewriting its history; no push was made." >&2
+              exit 1
+            fi
+            git push \
               "https://x-access-token:${SYNC_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
               HEAD:refs/heads/master
             echo "changed=true" >> "$GITHUB_OUTPUT"
-            echo "master now points to release source $RELEASE_TAG ($UPSTREAM_SHA) plus the sync workflow ($candidate)." >> "$GITHUB_STEP_SUMMARY"
+            echo "master now contains release source $RELEASE_TAG ($UPSTREAM_SHA), the fork sync workflow, and updated compatible security dependencies ($candidate)." >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Create or update the PR into openlogi-custom
