@@ -12,10 +12,13 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$DIR/common.sh"
 
 MODE="preflight"; ARTIFACT=""; TOKEN=""; PEER_ADDRESS="192.168.1.9"; PEER_NAME=""; FLOW_EDGE="right"
+HT_RUN_ID="${HT_RUN_ID:-}"; HT_EXPECTED_SHA="${HT_EXPECTED_SHA:-}"
 RESPAWN_SEC=20; WITH_INJECT=0; PORT=42424; PAIR_ROLE="initiate"
 usage() {
   cat <<USAGE
 Usage: sudo /bin/bash $0 --mode preflight|run|restore [options]
+  --run-id ID              successful Build run on openlogi-custom (required for run)
+  --expected-sha SHA       full 40-character head SHA (required for run)
   --artifact PATH           Local artifact (.zip wrapping .dmg, or .dmg)
   --download-token TOKEN    (discouraged: visible in shell history) - without it the script asks (hidden input)
   --peer-address HOST       Windows host for pair-start (default 192.168.1.9; port $PORT is added)
@@ -35,6 +38,8 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --mode) MODE="$2"; shift 2 ;;
     --artifact) ARTIFACT="$2"; shift 2 ;;
+    --run-id) HT_RUN_ID="$2"; shift 2 ;;
+    --expected-sha) HT_EXPECTED_SHA="$2"; shift 2 ;;
     --download-token) TOKEN="$2"; shift 2 ;;
     --peer-address) PEER_ADDRESS="$2"; shift 2 ;;
     --pair-role) PAIR_ROLE="$2"; shift 2 ;;
@@ -51,7 +56,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
-export HT_PORT="$PORT" HT_LEASE_MIN HT_HARDCAP_MIN
+export HT_PORT="$PORT" HT_LEASE_MIN HT_HARDCAP_MIN HT_RUN_ID HT_EXPECTED_SHA
 case "$PEER_ADDRESS" in *:*) PEER_TARGET="$PEER_ADDRESS" ;; *) PEER_TARGET="$PEER_ADDRESS:$PORT" ;; esac
 al_load || exit 2
 
@@ -135,6 +140,11 @@ fi
 # ---------------------------------------------------------------- run
 [[ "$MODE" == "run" ]] || { echo "Unknown mode: $MODE" >&2; exit 2; }
 is_root || { echo "run needs sudo:  sudo /bin/bash $0 --mode run" >&2; exit 2; }
+[[ -n "$HT_RUN_ID" && "${HT_EXPECTED_SHA:-}" =~ ^[[:xdigit:]]{40}$ ]] || { echo "Run mode requires --run-id and --expected-sha (40-character commit SHA) for the exact build." >&2; exit 2; }
+RUN_INFO="$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$HT_REPO/actions/runs/$HT_RUN_ID")" || { echo "Could not verify build run $HT_RUN_ID." >&2; exit 2; }
+if ! verify_build_run "$RUN_INFO" "$HT_EXPECTED_SHA"; then
+  echo "Build run provenance mismatch; nothing was changed." >&2; exit 2
+fi
 init_context "$(console_user)"
 [[ -n "$HT_TARGET_USER" && "$HT_TARGET_USER" != root && "$HT_TARGET_USER" != loginwindow ]] || { show_failed "No logged-in console user (log in on the Mac screen first)."; exit 1; }
 if [[ -f "$(state_path)" || -f "$HT_WATCHDOG_PLIST" ]]; then
@@ -192,7 +202,7 @@ HT_ARMED=1
 
 section "OpenLogi Flow HW test START (macOS, run 2)"
 write_r INFO "host=$(hostname) user=$HT_TARGET_USER port=$PORT edge=$FLOW_EDGE peer=$PEER_TARGET lease=${HT_LEASE_MIN}min hardcap=${HT_HARDCAP_MIN}min allowlist=$HT_ALLOWLIST"
-write_r INFO "build: run $HT_RUN_ID commit bd04518f (UNSIGNED)"
+write_r INFO "build: run $HT_RUN_ID expected commit $HT_EXPECTED_SHA (UNSIGNED; select local artifact from this exact run)"
 
 section "PRE-SNAPSHOT"
 write_r INFO "Pre-snapshot: $(take_snapshot "$HT_WORK/snapshot-pre.json") items -> $HT_WORK/snapshot-pre.json"
@@ -417,11 +427,13 @@ measure_check() {
   echo "Mac->Alienware 完成 $o 次 | Alienware->Mac 到达 $i 次 | 失败/忽略 $b 次"
   return 0
 }
-gate "GATE M5 (两台机器): 用真鼠标来回跨屏" "gate-m5-measure" 5 0 "" measure_check -- \
+gate "GATE M5 (两台机器): 鼠标跨屏与键盘跟随" "gate-m5-measure" 5 0 "" measure_check -- \
   "用 Logitech 真鼠标 (不要用触控板/别的鼠标):" \
   "  1) 在 Mac 上把光标一直往【右边缘】推 -> 光标应出现在 Alienware 屏幕上 (蓝牙切换常要 10-30 秒)。" \
   "  2) 在 Alienware 上把光标一直往【左边缘】推 -> 回到 Mac。" \
   "  至少来回 3 次。状态行会显示已检测到的次数。" \
+  "  3) 若测试键盘已连接到同一 Logitech 接收器/设备组，在两台上分别打开文本输入框；鼠标切换后在当前端输入唯一短文本，确认键盘输入跟随鼠标所在端，反向再测一次。" \
+  "  4) 记录键盘型号、连接方式、两端结果；若没有可配置键盘，明确记为未测试。" \
   "做完后在【本窗口】按回车结束测量 (Windows 窗口也按回车)。"
 
 section "FLOW EVENTS (from agent log)"

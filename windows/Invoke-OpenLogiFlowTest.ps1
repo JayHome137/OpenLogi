@@ -17,6 +17,8 @@
 param(
     [ValidateSet('Preflight', 'Run', 'Restore')][string]$Mode = 'Preflight',
     [string]$ArtifactZip,
+    [string]$ArtifactRunId,
+    [string]$ExpectedSha,
     [string]$DownloadToken,                    # plain string (discouraged; wiped after download)
     [SecureString]$DownloadTokenSecure,        # preferred: Read-Host -AsSecureString
     [string]$TargetUser,
@@ -105,6 +107,7 @@ if ($WatchdogMinutes -gt 0) { $LeaseMinutes = $WatchdogMinutes; Write-Host "NOTE
 if ($HumanGateSec -gt 0 -or $MeasureWaitSec -gt 0 -or $StartAtEpochMs -gt 0) { Write-Host 'NOTE: -HumanGateSec / -MeasureWaitSec / -StartAtEpochMs are ignored in run 2 (gates wait for Enter; READY handshake replaces T0).' -ForegroundColor Yellow }
 $HT.LeaseMinutes = $LeaseMinutes
 $HT.HardCapMinutes = $HardCapMinutes
+$HT.RunId = $ArtifactRunId
 [void](Import-HwAllowlist)
 
 if ($Mode -eq 'Restore') {
@@ -134,6 +137,8 @@ if ($Mode -eq 'Preflight') {
     $report['consoleSessionPresent'] = [bool](Get-ConsoleUser)
     $report['screenLocked'] = Test-ScreenLocked
     $report['resultLog'] = $C.ResultLog
+    $report['artifactRunId'] = $ArtifactRunId
+    $report['expectedSha'] = $ExpectedSha
     $report['configDir'] = $C.ConfigDir
     $report['leftoverStateFromEarlierRun'] = (Test-Path -LiteralPath $C.StatePath)
     $report['watchdogTaskExists'] = [bool](Get-ScheduledTask -TaskName $HT.WatchdogTask -TaskPath '\' -ErrorAction SilentlyContinue)
@@ -194,6 +199,13 @@ if ($Mode -eq 'Preflight') {
 
 # ----------------------------------------------------------------- RUN: pre-checks (nothing touched yet)
 if (-not (Test-IsAdmin)) { throw 'Run mode needs an elevated (Administrator) PowerShell.' }
+if (-not $ArtifactRunId -or -not $ExpectedSha -or $ExpectedSha -notmatch '^[0-9a-fA-F]{40}$') {
+    throw 'Run mode requires -ArtifactRunId and -ExpectedSha (40-character commit SHA) for the exact build.'
+}
+$runInfo = Invoke-RestMethod -Uri ("https://api.github.com/repos/{0}/actions/runs/{1}" -f $HT.Repo, $ArtifactRunId) -Headers @{ 'User-Agent' = 'openlogi-hwtest'; Accept = 'application/vnd.github+json' } -UseBasicParsing
+if (-not (Test-BuildRunProvenance $runInfo $ExpectedSha)) {
+    throw ("Build run provenance mismatch: workflow={0}, branch={1}, status={2}, conclusion={3}, head_sha={4}; expected Build/openlogi-custom/{5}." -f $runInfo.name, $runInfo.head_branch, $runInfo.status, $runInfo.conclusion, $runInfo.head_sha, $ExpectedSha)
+}
 if (-not $C.Profile) { Show-Failed ("Could not resolve target user profile (user '{0}'). Pass -TargetUser COMPUTER\user." -f $C.TargetUser); exit 1 }
 if (-not (Get-ConsoleUser)) { Show-Failed 'No interactive console session detected.'; exit 1 }
 if (Test-Path -LiteralPath $C.StatePath) {
@@ -239,7 +251,7 @@ try {
     '' | Set-Content -LiteralPath $C.ResultLog -Encoding UTF8 -ErrorAction SilentlyContinue
     Write-Section 'OpenLogi Flow HW test START (Windows, run 2)'
     Write-R ('host={0} user={1} port={2} edge={3} role={4} lease={5}min hardcap={6}min' -f $env:COMPUTERNAME, $C.TargetUser, $Port, $FlowEdge, $PairRole, $LeaseMinutes, $HardCapMinutes)
-    Write-R ('build: run {0} commit bd04518f, artifact {1}' -f $HT.RunId, $HT.ArtifactName)
+    Write-R ('build: run {0} expected commit {1}, artifact {2} (select local ZIP from this exact run)' -f $HT.RunId, $ExpectedSha, $HT.ArtifactName)
     Write-Banner -Color 'Yellow' -Lines @('Windows 端已开始。在本窗口出现绿色 READY 之前, 不要启动 Mac 端脚本。', (Format-LeaseStatus))
 
     Write-Section 'PRE-SNAPSHOT'
@@ -432,11 +444,13 @@ try {
         $bad = @($ev | Where-Object { $_.Event -match 'timed out|rejected|failed|ignored|cancelled|invalid' }).Count
         @{ Done = $true; Status = ('Alienware->Mac 完成 {0} 次 | Mac->Alienware 到达 {1} 次 | 失败/忽略 {2} 次' -f $out, $inc, $bad) }
     }
-    [void](Wait-HumanGate -Title 'GATE W4 (两台机器): 用真鼠标来回跨屏' -Phase 'gate-measure' -Check $measureCheck -PollSec 5 -Lines @(
+    [void](Wait-HumanGate -Title 'GATE W4 (两台机器): 鼠标跨屏与键盘跟随' -Phase 'gate-measure' -Check $measureCheck -PollSec 5 -Lines @(
             '用 Logitech 真鼠标(不要用触控板/别的鼠标):',
             '  1) 在 Alienware 上把光标一直往【左边缘】推 -> 光标应出现在 Mac 屏幕上(蓝牙切换常要 10-30 秒)。',
             '  2) 在 Mac 上把光标一直往【右边缘】推 -> 回到 Alienware。',
             '  至少来回 3 次。下面的状态行会显示已检测到的次数。',
+            '  3) 若测试键盘已连接到同一 Logitech 接收器/设备组，在两台上分别打开文本输入框；鼠标切换后在当前端输入唯一短文本，确认键盘输入跟随鼠标所在端，反向再测一次。',
+            '  4) 记录键盘型号、连接方式、两端结果；若没有可配置键盘，明确记为未测试。',
             '做完后在【本窗口】按回车结束测量(Mac 窗口也按回车)。'))
 
     Write-Section 'FLOW EVENTS (from agent log, UTC->local)'

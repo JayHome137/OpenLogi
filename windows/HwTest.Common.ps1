@@ -9,7 +9,7 @@
 #   * Restore is best-effort per item: every item has its own try/catch, a summary is printed at the end.
 #   * Watchdog = crash failsafe with a renewable lease (lease.json) + absolute hard cap.
 #
-# Facts taken from the OpenLogi repo (openlogi-custom @ bd04518f):
+# Facts were initially taken from openlogi-custom @ bd04518f; verify source-specific behavior against the selected build SHA.
 #   portable zip layout   .github/workflows/build.yml "Collect signed portable zip artifact"
 #                         (OpenLogi.exe, openlogi-overlay.exe, openlogi-agent.exe, bin\openlogi.exe)
 #   config/state/data     crates/openlogi-core/src/paths.rs (XDG layout also on Windows)
@@ -30,7 +30,7 @@ $script:HT = @{
     ResultName        = 'OpenLogi-test-result.log'
     PkgName           = 'OpenLogi-hwtest-pkg'
     Repo              = 'JayHome137/OpenLogi'
-    RunId             = '39235760610'
+    RunId             = ''
     ArtifactName      = 'OpenLogi-windows-x86_64'
     MutexName         = 'Global\OpenLogiHwTestRestore'
     LogFilter         = 'info,openlogi_agent_core=debug,openlogi_flow=debug,openlogi_device=debug,openlogi_hid=debug'
@@ -86,6 +86,11 @@ function Get-Prop {
 }
 # NOTE: @($null).Count is 1 in PowerShell (5.1 and 7) - an empty command result passed as an argument arrives as $null.
 function Get-Count { param($Value) if ($null -eq $Value) { return 0 } return @($Value).Count }
+function Test-BuildRunProvenance {
+    param($RunInfo, [string]$ExpectedSha)
+    return ($RunInfo -and $RunInfo.name -eq 'Build' -and $RunInfo.head_branch -eq 'openlogi-custom' -and
+        $RunInfo.status -eq 'completed' -and $RunInfo.conclusion -eq 'success' -and $RunInfo.head_sha -ieq $ExpectedSha)
+}
 
 # ----------------------------------------------------------------------------- logging / time
 function Get-NowMs { [DateTimeOffset]::UtcNow.ToUnixTimeMilliseconds() }
@@ -1077,6 +1082,11 @@ function Invoke-FullRestore {
     try { $mutex = New-Object Threading.Mutex($false, $HT.MutexName); $got = $mutex.WaitOne([TimeSpan]::FromMinutes(5)) }
     catch [Threading.AbandonedMutexException] { $got = $true }
     catch { Write-R ('mutex unavailable: ' + $_.Exception.Message) 'WARN' }
+    if (-not $got) {
+        if ($mutex) { $mutex.Dispose() }
+        Add-RestoreResult 'restore mutex' 'ERROR' 'timed out after 5 minutes; no restore mutations were attempted'
+        return (Write-RestoreSummary)
+    }
     $ok = $false
     try {
         Write-Section ("FULL RESTORE ({0})" -f $Reason)

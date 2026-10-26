@@ -269,17 +269,6 @@
         "path": "/Applications/OpenLogi.app/Contents/Library/LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay"
       }
     ],
-    "tccReset": {
-      "services": [
-        "Accessibility",
-        "ListenEvent"
-      ],
-      "bundleIds": [
-        "org.openlogi.openlogi",
-        "org.openlogi.agent",
-        "org.openlogi.overlay"
-      ]
-    },
     "launchdUserEnvUnsetIfAbsentBefore": [
       "OPENLOGI_LOG"
     ],

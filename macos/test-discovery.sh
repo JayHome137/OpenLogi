@@ -6,7 +6,7 @@
 # shellcheck disable=SC2317,SC2030,SC2031  # stubs invoked indirectly; per-check subshells isolate env on purpose
 
 DIR="$(cd "$(dirname "$0")" && pwd)"
-TMPW="$(mktemp -d /tmp/ol-hwtest-harness.XXXXXX)"
+TMPW="$(mktemp -d "${TMPDIR:-/tmp}/ol-hwtest-harness.XXXXXX")"
 export HT_WORK="$TMPW/work"
 mkdir -p "$HT_WORK"
 # shellcheck source=common.sh
@@ -21,6 +21,10 @@ notok(){ local d="$1"; shift; if "$@"; then fail "$d"; else pass "$d"; fi; }
 eq()   { if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1 (want [$3] got [$2])"; fi; }
 has()  { printf '%s\n' "$1" | grep -Fxq -- "$2"; }
 echo "bash: $BASH_VERSION"
+VALID_RUN='{"name":"Build","head_branch":"openlogi-custom","status":"completed","conclusion":"success","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
+ok "accept exact successful custom Build run" verify_build_run "$VALID_RUN" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+notok "reject Build run from another branch" verify_build_run "${VALID_RUN/openlogi-custom/master}" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+notok "reject mismatched commit SHA" verify_build_run "$VALID_RUN" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
 
 export HT_TARGET_UID=502 HT_TARGET_USER=jayboy137 HT_HOME=/Users/jayboy137
 export HT_CONFIG_HOME=/Users/jayboy137/.config HT_STATE_HOME=/Users/jayboy137/.local/state HT_DATA_HOME=/Users/jayboy137/.local/share

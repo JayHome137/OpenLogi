@@ -3,8 +3,8 @@
 **Jay 只需要看 [`RUNBOOK-Jay.md`](RUNBOOK-Jay.md)** (只写操作)。本文件放所有技术细节。
 改动和全部未验证项: [`CHANGES-run2.md`](CHANGES-run2.md)。允许改动的对象: [`ALLOWLIST.md`](ALLOWLIST.md) / `allowlist.json`。
 
-- Build: GitHub Actions run **39235760610** @ **bd04518f** (JayHome137/OpenLogi, branch openlogi-custom);
-  artifacts `OpenLogi-windows-x86_64`, `OpenLogi-macos-dmg-arm64`。
+- Build run ID and full commit SHA are supplied at run time; scripts reject runs that are not successful `Build` workflows at that SHA.
+  For a manually downloaded zip, select it from that exact run; the zip itself is not cryptographically bound to the run.
 - 机器: **.9** Jay-Alienware (Windows 11, PowerShell 5.1), **.8** Mac mini (macOS 27 arm64, 用户 jayboy137)。
 - 布局: Mac 在 Alienware 左边 → Windows `edge=left`, Mac `edge=right`。Flow UDP 端口 **42424**。
 - 测试期间 Logi Options+ 停止, 结束后精确恢复到测试前状态。
@@ -61,7 +61,7 @@ Pester (StrictMode Latest, mock 返回 0/1/多个对象); bash -n (bash 5 和 3.
 (bash 5 和 3.2.57); token 字符串扫描。**真 PowerShell 5.1 和真 macOS 无法在 Linux 上运行**, 见 CHANGES-run2.md。
 
 ## 握手细节
-- 源码 (bd04518f) 中: `flow listen` = 响应方 (120 秒窗口), `flow pair-start <addr>` = 发起方。run 1 两边都只发起, 没有一方监听。
+- Tested source behavior is reviewed against the exact commit used for the selected Build run: `flow listen` = responder (120-second window), `flow pair-start <addr>` = initiator. Run 1 had both machines initiating, so neither listened.
 - Windows (.9) 是响应方: `flow enable` → 20 秒内确认 UDP 42424 的拥有者是 `openlogi-agent` (`Get-NetUDPEndpoint`) → `flow listen`
   → 打印并记录 `READY: listening on UDP 42424`。GATE W2 每 3 秒查 `flow status`, 监听窗口结束时自动重开, 没有固定 sleep。
 - Mac (.8) 是发起方: GATE M0 (改动前人工确认 READY) → GATE M3 每 10 秒 `flow pair-start 192.168.1.9:42424`, 超过 600 秒提示去看 Windows。
@@ -94,13 +94,12 @@ Pester (StrictMode Latest, mock 返回 0/1/多个对象); bash -n (bash 5 和 3.
   - `-RepairLoginCheck`: 若 `\Microsoft\Windows\PushToInstall\LoginCheck` 为 Disabled 则启用它 (只用于修 run-1 那类损坏; 当前 Jay 已确认它是 Ready, 不需要)。
   - `-DeleteOpenLogiDirs`: 同时删除清单中的 OpenLogi 目录。
   - 脚本目录没了时: `%ProgramData%\OpenLogi-hwtest\suite\Emergency-Restore.ps1`。
-- Mac `emergency-restore.sh`: 有 state → `full_restore`; 无 state → 清单默认值, unset `OPENLOGI_LOG`; `--delete-openlogi-dirs` 同时重置 TCC。
+- Mac `emergency-restore.sh`: 有 state → `full_restore`; 无 state → 清单默认值, unset `OPENLOGI_LOG`; privacy permissions are left unchanged.
   脚本目录没了时: `/Library/Application Support/OpenLogi-hwtest/suite/emergency-restore.sh`。
 - 也可以: `Invoke-OpenLogiFlowTest.ps1 -Mode Restore` / `run-openlogi-flow-test.sh --mode restore`。
 
 ## 不用 PAT 的方式
-浏览器打开 https://github.com/JayHome137/OpenLogi/actions/runs/39235760610 下载 `OpenLogi-windows-x86_64` / `OpenLogi-macos-dmg-arm64`,
-然后 `-ArtifactZip <路径>` / `--artifact <路径>`。**Mac 默认就用这种方式** (PAT 只显示一次, 两台机器没有共享剪贴板); `--artifact` 接受 zip、dmg 或 Safari 自动解压出的文件夹。PAT 在 Windows 用 `Read-Host -AsSecureString` (改动前询问), Mac 用 `read -s` 并经 stdin 交给 `curl -K -`。
+Download the platform artifact from the exact successful Build run entered with its full commit SHA. Windows accepts `-ArtifactZip <path>` and macOS accepts `--artifact <path>`; the run metadata is checked before mutations, but manually supplied archives cannot be independently tied to that run. PAT downloads use the run ID directly. Windows uses `Read-Host -AsSecureString`; macOS reads it hidden and passes it to curl via stdin.
 
 ## Windows PowerShell 5.1 只解析检查 (未运行, 需要 Jay 另外授权)
 见 `tools/PARSE-ONLY-windows.txt`。只解析, 不执行脚本代码, 不需要管理员:

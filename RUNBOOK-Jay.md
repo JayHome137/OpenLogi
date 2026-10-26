@@ -19,8 +19,9 @@
 
 **0. 准备 (约 5 分钟)**
 - 脚本由助手拷到两台机器, **需要你另外点头授权**。
-- (只给 Windows 用) 建 PAT: 在 .9 浏览器打开 https://github.com/settings/personal-access-tokens/new → Token name `openlogi-hwtest-run2`, Expiration `7 days` → Repository access 选 **Only select repositories** → 选 **JayHome137/OpenLogi** → Permissions → **Actions: Read-only** (其它不动) → **Generate token** → 复制 (只显示一次)。不想用 PAT: 在 .9 浏览器下载 Windows 的 artifact zip, 第 3 步命令末尾加 ` -ArtifactZip "<zip 路径>"`。
-- (Mac 用) 在 **.8 的浏览器**打开 https://github.com/JayHome137/OpenLogi/actions/runs/39235760610 → 页面下方 **Artifacts** → 点 **OpenLogi-macos-dmg-arm64** 下载 (存到 **下载** 文件夹)。
+- 使用对应 `openlogi-custom` 成功 Build run 的 run ID 和完整 head SHA；必须是本次要测的构建提交。启动命令显式填写 run ID/SHA，脚本会检查该 run 成功且 SHA 相符。手动下载的 zip 必须从同一 run 的 Artifacts 区下载；普通 zip 无法由脚本独立证明其来源。
+- (只给 Windows 用) 如需脚本下载，建 PAT: 在 .9 浏览器打开 https://github.com/settings/personal-access-tokens/new → Token name `openlogi-hwtest-run2`, Expiration `7 days` → Repository access 选 **Only select repositories** → 选 **JayHome137/OpenLogi** → Permissions → **Actions: Read-only** → Generate token。
+- (Mac 用) 在 **.8 浏览器**打开对应 Build run 的页面 → **Artifacts** → 下载 `OpenLogi-macos-dmg-arm64`。
 
 **1. 预检 .9 (1 分钟)** — **关掉 Options+ 窗口；如果还卡在这里，右下角托盘里右键 Options+ 图标 > 退出。** 开始菜单搜 **Windows PowerShell** → 右键 **以管理员身份运行** → **是**。粘贴:
 ```
@@ -34,20 +35,20 @@ sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode preflight -
 ```
 `PREFLIGHT RESULT: OK` → 继续。看到 `!!! codesign ... NOT signed` → 停, 告诉 GM。窗口别关。
 
-**3. 先启动 .9 (3–5 分钟)** — **关掉 Options+ 窗口；如果还卡在这里，右下角托盘里右键 Options+ 图标 > 退出** (窗口还开着时脚本停在 GATE W0, 关好按回车)。在 .9 的管理员窗口粘贴:
+**3. 先启动 .9 (3–5 分钟)** — 将命令中的 `<run-id>` 和 `<40-char-sha>` 替换为本次 Build run 的实际值。**关掉 Options+ 窗口；如果还卡在这里，右下角托盘里右键 Options+ 图标 > 退出** (窗口还开着时脚本停在 GATE W0, 关好按回车)。在 .9 的管理员窗口粘贴:
 ```
-Set-ExecutionPolicy -Scope Process Bypass -Force; & "$env:LOCALAPPDATA\Temp\ol-hwtest\windows\Invoke-OpenLogiFlowTest.ps1" -Mode Run
+Set-ExecutionPolicy -Scope Process Bypass -Force; & "$env:LOCALAPPDATA\Temp\ol-hwtest\windows\Invoke-OpenLogiFlowTest.ps1" -Mode Run -ArtifactRunId <run-id> -ExpectedSha <40-char-sha>
 ```
 - 提示 PAT → 右键粘贴 (看不到字是正常的) → 回车。
 - 如果出现蓝色 **Windows 已保护你的电脑**: 点 **更多信息** → **仍要运行**, 回窗口输入 `retry` 回车。
 - 如果出现 **Windows 安全中心警报**: 只勾 **专用网络** → **允许访问**。**不要点"取消"**。
 - 等到**绿色** `READY: listening on UDP 42424` → 去第 4 步。出现**红色 FAILED** → **不要启动 Mac**, 等 DONE, 发日志给 GM。
 
-**4. 再启动 .8 (5–10 分钟)** — 在 .8 终端粘贴下面这行, **末尾有一个空格, 先别按回车**:
+**4. 再启动 .8 (5–10 分钟)** — 将 `<run-id>`、`<40-char-sha>` 和 `<artifact-path>` 换成实际值，路径用双引号括起。然后在 .8 终端粘贴命令:
 ```
-sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode run --artifact 
+sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode run --run-id <run-id> --expected-sha <40-char-sha> --artifact "<artifact-path>"
 ```
-然后打开 **访达** → **下载**, 把第 0 步下载的 **OpenLogi-macos-dmg-arm64** (zip 或者自动解压出来的文件夹都可以) **拖进终端窗口**, 再按回车。
+将 `<run-id>` 和 `<40-char-sha>` 替换为所选 Build run 的实际值；`<artifact-path>` 替换为从该 run 下载的 artifact zip 路径。脚本会在修改系统前核对 Build run 成功状态和 commit SHA。
 - 如果弹 **"终端"想访问"下载"文件夹中的文件** → 点 **允许**。
 - 问 "Windows 端准备好了吗?" → .9 是绿色 READY 就按回车。
 - 如果弹 **无法打开 "OpenLogi"**: 点 **完成**。然后 苹果菜单 → **系统设置** → **隐私与安全性** → 拉到底 → **仍要打开** → 输密码 → **仍要打开**。回终端输入 `retry` 回车。
@@ -61,8 +62,9 @@ sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode run --artif
 **5. 核对 6 位码 (1–2 分钟)** — 两边窗口都会显示一个 6 位码 (如 `123 456`)。
 一样: **.9 输入 `y` 回车, 再 .8 输入 `y` 回车**。不一样: 输入 `n` 回车, 然后两边按回车重试。要在 2 分钟内两边都确认。显示 **配对完成** 后自动继续。
 
-**6. 真鼠标跨屏 (3–5 分钟)** — 用 Logitech 真鼠标:
+**6. 鼠标跨屏与键盘跟随 (5–8 分钟)** — 用 Logitech 真鼠标:
 .9 上光标往 **左边缘** 推 → 到 Mac; Mac 上往 **右边缘** 推 → 回 .9。每次可能要等 10–30 秒。**来回至少 3 次**。窗口里的计数会增加。做完两边各按 **回车**。
+若键盘也连接到同一 Logitech 接收器/设备组，在两台分别打开文本输入框；每次鼠标切换后输入不同短文本，确认键盘输入跟随鼠标所在端，并反向重复。记录键盘型号、连接方式和结果；没有可配置键盘则标记未测。
 
 **7. 等 DONE (1–2 分钟)** — 两边自动恢复 Options+。等到出现 **DONE** 再关窗口。
 绿色 = 全部恢复好; 红色 = 有项目没恢复, 跑第 8 步。
@@ -76,10 +78,10 @@ sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode run --artif
   - .8 重启过 (`/tmp` 会被清空) 就用: `sudo /bin/bash "/Library/Application Support/OpenLogi-hwtest/suite/emergency-restore.sh"`
 
 **9. 收尾 (5 分钟)**
-- .8: **系统设置** → **隐私与安全性** → **输入监控** 和 **辅助功能**: 选中 OpenLogi Agent → 点 **−**。**本地网络**: 把 OpenLogi Agent 的开关关掉。
-- .8: **系统设置** → **网络** → **防火墙** → **选项…** → 选中**所有** openlogi-agent 条目 → **−** → **好**。
+- .8: 对照结果日志的测试前后权限快照，只移除本轮新增的 **输入监控**、**辅助功能**授权；**本地网络**也只关闭本轮新增的 OpenLogi Agent 条目。若无法确认某项是本轮新增，保留并报告，不要清除测试前已有授权。
+- .8: **系统设置** → **网络** → **防火墙** → **选项…** → 只移除本次测试新出现的 OpenLogi Agent 规则；测试前已有规则保留。
 - .8: **系统设置** → **通用** → **登录项与扩展** → 在列表里选中 **OpenLogi** 和 **bash** 的后台项目 → 点 **−** (或关掉开关)。
-- .9: 运行 `wf.msc` → **入站规则** → 把名为 **openlogi-agent** 的规则**全部**右键 → **删除** (可能有好几条)。
+- .9: 脚本创建的规则名为 `OpenLogiHwTest-UDP-42424` 和 `OpenLogiHwTest-mDNS-5353`，正常恢复会自动删除；仅在 RESTORE SUMMARY 报未清除时，删除这两个精确名称且确认是本次测试新增的规则。不要删除所有名为 `openlogi-agent` 的规则。
 - 两台都删掉拷进来的脚本文件夹: .9 `%LOCALAPPDATA%\Temp\ol-hwtest`, .8 终端 `sudo rm -rf /tmp/ol-hwtest`。
 - GitHub: https://github.com/settings/personal-access-tokens → `openlogi-hwtest-run2` → **Delete**。
 

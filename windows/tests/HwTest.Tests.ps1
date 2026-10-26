@@ -50,6 +50,16 @@ BeforeAll {
 AfterAll { Remove-Item -LiteralPath $script:TestRoot -Recurse -Force -ErrorAction SilentlyContinue }
 
 Describe 'StrictMode helpers (run-1 crash class)' {
+    It 'accepts only a successful Build run on openlogi-custom at the expected commit' {
+        $run = [pscustomobject]@{ name = 'Build'; head_branch = 'openlogi-custom'; status = 'completed'; conclusion = 'success'; head_sha = ('a' * 40) }
+        Test-BuildRunProvenance $run ('A' * 40) | Should -BeTrue
+        $run.head_branch = 'master'
+        Test-BuildRunProvenance $run ('A' * 40) | Should -BeFalse
+        $run.head_branch = 'openlogi-custom'; $run.conclusion = 'failure'
+        Test-BuildRunProvenance $run ('A' * 40) | Should -BeFalse
+        $run.conclusion = 'success'
+        Test-BuildRunProvenance $run ('b' * 40) | Should -BeFalse
+    }
     It 'Get-Count handles $null, scalar, array' {
         Get-Count $null | Should -Be 0
         Get-Count ([pscustomobject]@{ a = 1 }) | Should -Be 1

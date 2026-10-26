@@ -17,7 +17,7 @@ HT_APP_BUNDLE_ID="org.openlogi.openlogi"
 HT_AGENT_SERVICE="org.openlogi.agent.service"
 HT_FIREWALL="/usr/libexec/ApplicationFirewall/socketfilterfw"
 HT_REPO="JayHome137/OpenLogi"
-HT_RUN_ID="39235760610"
+HT_RUN_ID="${HT_RUN_ID:-}"
 HT_ARTIFACT_ARM64="OpenLogi-macos-dmg-arm64"
 HT_ARTIFACT_X86="OpenLogi-macos-dmg-x86_64"
 HT_PORT="${HT_PORT:-42424}"
@@ -31,6 +31,9 @@ HT_HARDCAP_MIN="${HT_HARDCAP_MIN:-120}"
 HT_OWN_MARKERS="OpenLogi-hwtest|run-openlogi-flow-test|ol-hwtest|com.openlogi.hwtest"
 
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+verify_build_run() {
+  printf '%s' "$1" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("name")=="Build" and d.get("head_branch")=="openlogi-custom" and d.get("status")=="completed" and d.get("conclusion")=="success" and d.get("head_sha","").lower()==sys.argv[1].lower() else 1)' "$2"
+}
 fmt_ms() {
   python3 - "${1:-0}" <<'PY'
 import sys, datetime
@@ -138,10 +141,6 @@ elif kind == "gui":
     out = [g.get("bundlePath", "") + "\t" + g.get("bundleIdFallback", "") + "\t" + g.get("mainExecutable", "")]
 elif kind == "rb-apps":
     out = [a["labelPrefix"] + "\t" + a["bundlePath"] for a in d.get("runningBoardApps", [])]
-elif kind == "tcc-services":
-    out = list(d.get("tccReset", {}).get("services", []))
-elif kind == "tcc-bundles":
-    out = list(d.get("tccReset", {}).get("bundleIds", []))
 elif kind == "env-unset":
     out = list(d.get("launchdUserEnvUnsetIfAbsentBefore", []))
 elif kind in ("paths-absent", "paths-empty", "paths-write"):
@@ -865,17 +864,6 @@ remove_test_files() {
     if [[ -z "$(ls -A "$d" 2>/dev/null)" ]]; then rm_safe "$d" || true; else rr LEFTOVER "keep $d" "created during the test but not empty"; fi
   done < <(al_get paths-empty | awk '{ print length($0) "\t" $0 }' | sort -rn | cut -f2-)
 }
-reset_tcc_for_openlogi() {
-  section "TCC reset (OpenLogi bundle ids only)"
-  local s b
-  for s in $(al_get tcc-services); do
-    for b in $(al_get tcc-bundles); do
-      if tccutil reset "$s" "$b" >/dev/null 2>&1 || as_user tccutil reset "$s" "$b" >/dev/null 2>&1; then rr OK "tccutil reset $s $b"
-      else rr WARN "tccutil reset $s $b" "failed - remove manually (RUNBOOK 第 9 步)"; fi
-    done
-  done
-  rr LEFTOVER "Local Network (本地网络) entry for OpenLogi" "tccutil cannot reset it; see RUNBOOK 第 9 步"
-}
 restore_launchd_env() {
   local v pre cur prev
   prev="$HT_WORK/snapshot-pre.json"
@@ -946,7 +934,7 @@ _mutex_take() {
     holder="$(cat "$HT_MUTEX/pid" 2>/dev/null || true)"
     if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then rm -rf "$HT_MUTEX"; continue; fi
     sleep 1; waited=$((waited + 1))
-    if [[ $waited -gt 300 ]]; then write_r ERROR "restore mutex busy for 300 s - continuing anyway"; return 0; fi
+    if [[ $waited -gt 300 ]]; then write_r ERROR "restore mutex busy for 300 s - refusing concurrent restore"; return 1; fi
   done
   echo $$ >"$HT_MUTEX/pid"
 }
@@ -954,13 +942,13 @@ _mutex_drop() { rm -rf "$HT_MUTEX" 2>/dev/null || true; }
 HT_DIFF_RESULT="n/a"
 full_restore() {
   local reason="$1"
-  _mutex_take
+  _mutex_take || { rr ERROR "restore mutex" "timed out after 300 s; no restore mutations were attempted"; rr_summary || true; return 1; }
   HT_RR_ERR=0; HT_RR_N=0; HT_RR_TEXT=""
   section "FULL RESTORE ($reason)"
   step "stop OpenLogi" stop_openlogi
   step "restore Options+" restore_options_plus
   step "launchd env" restore_launchd_env
-  step "TCC reset" reset_tcc_for_openlogi   # before the app is deleted
+  rr LEFTOVER "OpenLogi TCC permissions" "left unchanged; remove only newly added grants manually (RUNBOOK 收尾)"
   step "files" remove_test_files
   export HT_COMPLETED=1
   [[ -d "$HT_WORK" ]] && { save_state || true; }

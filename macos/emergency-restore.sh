@@ -42,7 +42,7 @@ for v in $(al_get env-unset); do
 done
 if [[ $DELETE_DIRS -eq 1 ]]; then
   for d in "$HT_APP" "$HT_CONFIG_DIR" "$HT_STATE_DIR" "$HT_DATA_DIR"; do rm_safe "$d" || true; done
-  step "TCC reset" reset_tcc_for_openlogi
+  rr LEFTOVER "OpenLogi TCC permissions" "left unchanged; remove only newly added grants manually"
 else
   for d in "$HT_APP" "$HT_CONFIG_DIR" "$HT_STATE_DIR" "$HT_DATA_DIR"; do [[ -e "$d" ]] && rr LEFTOVER "keep $d" "use --delete-openlogi-dirs to remove"; done
 fi
