@@ -1,11 +1,14 @@
 //! What a release tag says about the release it names, and the version
 //! installers compare.
 //!
-//! release-plz tags a stable release `vX.Y.Z`. A beta is tagged
-//! `vX.Y.Z-beta.N` on `master`, without a version bump: `X.Y.Z` is the stable
-//! release it leads to, and `N` counts the commits since the stable release
-//! before it, so a later beta has a larger `N`. Every command that reads a
-//! release tag parses it here.
+//! release-plz tags a stable release `vX.Y.Z`. The prerelease workflow tags
+//! a beta `vX.Y.Z-beta.N` on `master`, without a version bump: `X.Y.Z` is the
+//! stable release it leads to, and `N` counts the commits since the stable
+//! release before it. Within one stable release's cycle, a later beta has a
+//! larger `N`; the count starts again after the next stable release.
+//!
+//! Every command that reads a release tag parses it here, and
+//! [`ReleaseTag::beta`] spells the beta tag `release next-beta` names.
 
 use std::fmt;
 use std::str::FromStr;
@@ -46,6 +49,17 @@ impl ReleaseTag {
             "release tag {tag:?} is a pre-release other than `beta.N` with N at least 1"
         );
         Ok(parsed)
+    }
+
+    /// The beta tag `v<release>-beta.<number>`: beta `number` of the stable
+    /// release `release` will be. Fails unless `release` is `X.Y.Z` and
+    /// `number` is at least 1, the shapes [`Self::parse`] accepts.
+    pub(crate) fn beta(release: &Version, number: u64) -> Result<Self> {
+        ensure!(
+            release.pre.is_empty() && release.build.is_empty(),
+            "a beta leads to a stable release, and {release} is not `X.Y.Z`"
+        );
+        Self::parse(&format!("v{release}-{BETA_PREFIX}{number}"))
     }
 
     /// The version of a stable release tag; `None` for a beta tag or any
@@ -127,6 +141,15 @@ impl ReleaseTag {
         base.map_or(&self.version, |base| &base.version)
     }
 
+    /// The version a build of this tag stamps into the workspace before it
+    /// compiles, with `release stamp-version`; `None` when the tagged commit
+    /// already carries the tag's own version. A beta's tagged commit carries
+    /// the stable release it follows, so its build stamps the beta's version,
+    /// and every `CARGO_PKG_VERSION` in it reports the beta.
+    pub(crate) fn stamp_version<'a>(&'a self, base: Option<&'a BetaBase>) -> Option<&'a Version> {
+        (self.tagged_workspace_version(base) != &self.version).then_some(&self.version)
+    }
+
     /// `N` of a beta tag; `None` for a stable tag. `N` is at least 1: Sparkle
     /// pads a missing field with 0, so `B.0` would equal `B`.
     fn beta_number(&self) -> Option<u64> {
@@ -164,7 +187,10 @@ impl fmt::Display for ReleaseTag {
 /// Windows Installer ignores the fourth field when it compares versions, so
 /// every beta after `B` looks like `B` to it. `OpenLogi.wxs` sets
 /// `AllowSameVersionUpgrades` for that reason.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The order is Sparkle's: field by field, and a version without a fourth
+/// field before the same version with one.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(crate) struct BuildVersion {
     base: [u64; 3],
     beta: Option<u64>,
@@ -207,6 +233,39 @@ impl BuildVersion {
         };
         build.check_msi_limits()?;
         Ok(build)
+    }
+
+    /// Check that a release tagged `tag` can carry this build version: a
+    /// stable release's is its own version, and a beta's ends in the beta's
+    /// `N`, after a stable release older than the beta.
+    pub(crate) fn ensure_fits(&self, tag: &ReleaseTag) -> Result<()> {
+        let tagged = numeric_fields(tag.version());
+        match tag.beta_number() {
+            None => ensure!(
+                *self
+                    == Self {
+                        base: tagged,
+                        beta: None
+                    },
+                "{tag} is a stable release, so its build version is {}, not {self}",
+                Self {
+                    base: tagged,
+                    beta: None
+                }
+            ),
+            Some(number) => {
+                ensure!(
+                    self.beta == Some(number),
+                    "{tag} is beta {number}, so its build version ends in .{number}, not {self}"
+                );
+                ensure!(
+                    self.base < tagged,
+                    "{tag} follows a stable release older than itself, so its build version starts below {}, not {self}",
+                    tag.version()
+                );
+            }
+        }
+        Ok(())
     }
 
     fn fields(&self) -> impl Iterator<Item = u64> + '_ {
