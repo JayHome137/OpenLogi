@@ -29,6 +29,7 @@ fn snapshot(cx: &mut gpui::TestAppContext, inventory: Vec<DeviceInventory>) {
         camera_active: false,
         pairing: None,
         foreground: ForegroundApps::default(),
+        flow: openlogi_ipc::FlowStatus::default(),
         lights: Vec::new(),
     };
     cx.update(|cx| {

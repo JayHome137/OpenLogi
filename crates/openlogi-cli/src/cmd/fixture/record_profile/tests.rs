@@ -20,10 +20,10 @@ use openlogi_fixture::{
 use openlogi_ipc::client::ProtocolSkew;
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, Agent, AgentStatus, BacklightObservation,
-    ClientKind, ConfigReloadError, FlowCommandError, FlowLayout, ForegroundApps, Generation,
-    Identity, InventoryHealth, LockKeyObservation, MonitorEvent, NoticeObservation, Observation,
-    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
-    RingObservation, SavedConfig, SavedConfigVerdict,
+    ClientKind, ConfigReloadError, FlowCommandError, FlowLayout, FlowStatus, ForegroundApps,
+    Generation, Identity, InventoryHealth, LockKeyObservation, MonitorEvent, NoticeObservation,
+    Observation, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
+    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict,
 };
 use tarpc::client::RpcError;
 use tarpc::context::Context as TarpcContext;

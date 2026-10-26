@@ -46,7 +46,6 @@ use openlogi_core::hid::{
 };
 #[cfg(test)]
 use openlogi_ipc::FlowStatus;
-use openlogi_ipc::SavedConfig;
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure, SavedConfigVerdict,

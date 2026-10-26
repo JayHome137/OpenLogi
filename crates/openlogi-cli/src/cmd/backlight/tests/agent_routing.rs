@@ -52,6 +52,7 @@ fn snapshot() -> AgentSnapshot {
             current: None,
             recent: Vec::new(),
         },
+        flow: openlogi_ipc::FlowStatus::default(),
         lights: Vec::new(),
     }
 }
