@@ -1,5 +1,5 @@
-### 2026-10-20 17:58:00 CST
-### cmd: bash -c rc=0; for f in macos/common.sh macos/run-openlogi-flow-test.sh macos/watchdog.sh macos/emergency-restore.sh macos/inject.sh macos/test-discovery.sh tools/run-offline-tests.sh; do "/tmp/bash-3.2.57/bash" -n "$f" && echo "ok $f" || rc=1; done; exit $rc
+### 2026-10-26 13:41:34 CST
+### cmd: /bin/bash -n SH_FILES
 
 ok macos/common.sh
 ok macos/run-openlogi-flow-test.sh
