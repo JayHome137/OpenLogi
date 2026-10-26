@@ -57,6 +57,7 @@ mod dpi;
 mod easy_switch;
 mod flow;
 mod fn_lock;
+pub(crate) mod force_sensing;
 mod light_adoption;
 mod lighting;
 mod os_layout;
