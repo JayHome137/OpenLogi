@@ -52,11 +52,11 @@ use openlogi_core::hid::{
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
     AgentResponse, AgentSnapshot, AgentStatus, BacklightObservation, ChosenLight, ClientKind,
-    ConfigReloadError, ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange,
-    LockKeyObservation, MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation,
-    ObservedLight, PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase,
-    PairingUpdate, RingObservation, SavedConfig, SavedConfigVerdict, SecureInput,
-    VirtualKeyboardStatus,
+    ConfigReloadError, FlowEdge, FlowLayout, FlowLinkState, FlowPeerStatus, FlowStatus,
+    ForegroundApps, FoundDevice, Identity, InventoryHealth, LockKeyChange, LockKeyObservation,
+    MonitorEvent, Notice, NoticeKind, NoticeObservation, Observation, ObservedLight,
+    PROTOCOL_VERSION, PairingCommandError, PairingFailure, PairingPhase, PairingUpdate,
+    RingObservation, SavedConfig, SavedConfigVerdict, SecureInput, VirtualKeyboardStatus,
 };
 use succession::{Compat, Run};
 
@@ -112,7 +112,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 41);
+    assert_eq!(PROTOCOL_VERSION, 42);
 }
 
 #[test]
@@ -443,6 +443,32 @@ fn lock_keys() {
     );
 }
 
+/// v42: Flow's management RPCs follow all v41 methods, so their request
+/// indices start at `0x2f`.
+#[test]
+fn flow_requests() {
+    assert_wire(&AgentRequest::FlowSetEnabled { enabled: true }, "2f01");
+    assert_wire(
+        &AgentRequest::FlowPairStart {
+            address: "mac".into(),
+        },
+        "30036d6163",
+    );
+    assert_wire(&AgentRequest::FlowPairListen {}, "31");
+    assert_wire(&AgentRequest::FlowPairConfirm {}, "32");
+    assert_wire(&AgentRequest::FlowPairReject {}, "33");
+    assert_wire(&AgentRequest::FlowPairCancel {}, "34");
+    assert_wire(
+        &AgentRequest::FlowSetLayout {
+            layout: vec![FlowLayout {
+                edge: FlowEdge::Right,
+                peer: "mac".into(),
+            }],
+        },
+        "350101036d6163",
+    );
+}
+
 /// A chord crosses the wire as its modifier bits and the key's HID usage.
 #[test]
 fn key_combo_modifier_bits() {
@@ -594,15 +620,42 @@ fn agent_snapshot() {
         foreground: ForegroundApps::default(),
         // Pinned populated in `observed_light` below.
         lights: Vec::new(),
+        flow: FlowStatus::default(),
     };
-    assert_wire(&snapshot, "010001010705302e362e360100000000000000000000");
+    assert_wire(
+        &snapshot,
+        "010001010705302e362e360100000000000000000000000000",
+    );
 
     // The observation is the snapshot with its generation in front.
     let observed = Observation {
         generation: 3,
         snapshot,
     };
-    assert_wire(&observed, "03010001010705302e362e360100000000000000000000");
+    assert_wire(
+        &observed,
+        "03010001010705302e362e360100000000000000000000000000",
+    );
+}
+
+#[test]
+fn flow_status() {
+    assert_wire(&FlowStatus::default(), "000000");
+    assert_wire(
+        &FlowStatus {
+            enabled: true,
+            peers: vec![FlowPeerStatus {
+                name: "desk".into(),
+                public_key: "key".into(),
+                state: FlowLinkState::Degraded,
+            }],
+            pairing: None,
+        },
+        "0101046465736b036b65790100",
+    );
+    assert_wire(&FlowLinkState::Connected, "00");
+    assert_wire(&FlowLinkState::Degraded, "01");
+    assert_wire(&FlowLinkState::Lost, "02");
 }
 
 /// The foreground application rides the snapshot, so both halves are pinned:

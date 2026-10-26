@@ -1,7 +1,9 @@
 use gpui::{AppContext as _, AssetSource, Modifiers, TestAppContext};
 use openlogi_core::config::Config;
 use openlogi_core::device::DeviceInventory;
-use openlogi_ipc::{AgentSnapshot, AgentStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION};
+use openlogi_ipc::{
+    AgentSnapshot, AgentStatus, FlowStatus, ForegroundApps, InventoryHealth, PROTOCOL_VERSION,
+};
 use openlogi_ui::action_icons::ActionIcons;
 use tokio::sync::mpsc;
 
@@ -44,6 +46,7 @@ fn snapshot(receivers: Vec<ReceiverInfo>) -> AgentSnapshot {
         pairing: None,
         foreground: ForegroundApps::default(),
         lights: Vec::new(),
+        flow: FlowStatus::default(),
     }
 }
 

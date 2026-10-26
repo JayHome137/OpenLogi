@@ -22,6 +22,7 @@ use tracing::{info, warn};
 use super::scroll::ScrollInputHandle;
 use super::{ActionDispatchTarget, ActionDispatcher, PressToken};
 use crate::event_monitor::SharedEventMonitor;
+use crate::flow::FlowInputHandle;
 
 /// The button maps and selected-device thumb-wheel polarity the OS-hook callback
 /// reads, kept behind ONE lock so a config rebuild publishes one coherent
@@ -445,6 +446,7 @@ pub fn start(
     dispatcher: ActionDispatcher,
     scroll: ScrollInputHandle,
     monitor: SharedEventMonitor,
+    flow: FlowInputHandle,
 ) -> Option<Hook> {
     if !Hook::has_accessibility() {
         warn!(
@@ -475,7 +477,14 @@ pub fn start(
                     &dispatcher,
                     openlogi_hook::frontmost_safari_pid,
                 ),
-                MouseEvent::Moved { delta_x, delta_y } => {
+                MouseEvent::Moved {
+                    delta_x,
+                    delta_y,
+                    cursor,
+                } => {
+                    if let Some(sample) = cursor {
+                        flow.try_moved(sample);
+                    }
                     handle_moved(delta_x, delta_y, &hooks, &dispatcher)
                 }
                 MouseEvent::CaptureInterrupted => {
@@ -519,13 +528,18 @@ pub fn start(
         // HoldShortcut enters the same down/up/cancel lifecycle as a mouse
         // button. The active set pairs key-up even if modifier state or config
         // changes while the key is down.
-        HookEvent::Key(event) => handle_key(
-            event,
-            &keyboard_bindings,
-            &action_tx,
-            &dispatcher,
-            ActionDispatchTarget::capture,
-        ),
+        HookEvent::Key(event) => {
+            if is_paste_shortcut(event) {
+                flow.try_paste();
+            }
+            handle_key(
+                event,
+                &keyboard_bindings,
+                &action_tx,
+                &dispatcher,
+                ActionDispatchTarget::capture,
+            )
+        }
     });
 
     match result {
@@ -538,6 +552,14 @@ pub fn start(
             None
         }
     }
+}
+
+const PASTE_KEYCODE: u16 = 0x09;
+
+fn is_paste_shortcut(event: KeyEvent) -> bool {
+    event.pressed
+        && event.keycode == PASTE_KEYCODE
+        && (event.modifiers.command || event.modifiers.control)
 }
 
 /// Resolve a native horizontal-wheel tick to a rebound thumb-wheel action.

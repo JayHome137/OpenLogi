@@ -118,6 +118,9 @@ pub enum HostSwitchError {
     /// A required HID++ operation failed.
     #[error("HID++ protocol error: {0}")]
     Hidpp(String),
+    /// The device does not expose the ChangeHost feature.
+    #[error("device does not expose HID++ ChangeHost feature 0x1814")]
+    FeatureUnsupported,
     /// A required HID++ operation did not complete within its budget.
     #[error("HID++ operation timed out while {operation}")]
     TimedOut {
@@ -134,6 +137,14 @@ pub enum HostSwitchError {
     HostSlotEmpty {
         /// The zero-based host slot that has no pairing.
         host: u8,
+    },
+    /// The requested host does not exist on this device.
+    #[error("host {host} is outside device host count {host_count}")]
+    HostOutOfRange {
+        /// The zero-based host slot that was requested.
+        host: u8,
+        /// Number of host slots reported by the device.
+        host_count: u8,
     },
 }
 
@@ -885,6 +896,80 @@ pub async fn switch_linked_hosts(
     Ok(changed)
 }
 
+/// Validate and switch several devices to independently configured host slots.
+pub async fn switch_hosts(
+    targets: &[(DeviceRoute, u8)],
+    channel_pool: &ChannelPool,
+) -> Result<(), HostSwitchError> {
+    let mut prepared = Vec::with_capacity(targets.len());
+    for (route, host) in targets {
+        let channel = open_channel(channel_pool, route, "opening Flow device channel")
+            .await?
+            .ok_or(HostSwitchError::TargetNotFound)?;
+        prepared.push(prepare_host_change_on(&channel, route.device_index(), *host).await?);
+    }
+    for change in prepared {
+        apply_host_change(change).await?;
+    }
+    Ok(())
+}
+
+/// Read how many Easy-Switch host slots the device at `route` has.
+///
+/// Prefers `0x1815 HostsInfo`, which reports the slot count independently of
+/// the current host; falls back to `0x1814 ChangeHost` for devices without it.
+pub async fn read_host_count(
+    channel_pool: &ChannelPool,
+    route: &DeviceRoute,
+) -> Result<u8, HostSwitchError> {
+    let channel = open_channel(channel_pool, route, "opening device channel for host count")
+        .await?
+        .ok_or(HostSwitchError::TargetNotFound)?;
+    read_host_count_on(channel, route.device_index()).await
+}
+
+async fn read_host_count_on(
+    channel: Arc<HidppChannel>,
+    device_index: u8,
+) -> Result<u8, HostSwitchError> {
+    let mut device = timed_hidpp(
+        "opening host-count device",
+        Device::new(channel, device_index),
+    )
+    .await?;
+    if let Some(info) = timed_hidpp(
+        "locating hosts-info feature",
+        device.root().get_feature(HostsInfoFeature::ID),
+    )
+    .await?
+    {
+        let hosts_info = device.add_feature::<HostsInfoFeature>(info.index);
+        match timed_hidpp("reading host count", hosts_info.get_feature_info()).await {
+            Ok(info) if info.host_count > 0 => return Ok(info.host_count),
+            Ok(_) => debug!("hosts-info reports no slots; asking change-host"),
+            Err(error) => debug!(%error, "hosts-info count unreadable; asking change-host"),
+        }
+    }
+    let info = timed_hidpp(
+        "locating host-change feature",
+        device.root().get_feature(ChangeHostFeature::ID),
+    )
+    .await?
+    .ok_or(HostSwitchError::FeatureUnsupported)?;
+    let change_host = device.add_feature::<ChangeHostFeature>(info.index);
+    Ok(
+        timed_hidpp("reading host count", change_host.get_host_info())
+            .await?
+            .host_count,
+    )
+}
+
+/// Switch one device on an already-open shared channel to a host slot.
+pub async fn switch_host_on(shared: &SharedChannel, host: u8) -> Result<bool, HostSwitchError> {
+    let change = prepare_host_change_on(shared.channel(), shared.device_index(), host).await?;
+    apply_host_change(change).await
+}
+
 async fn arm_host_controls_inner(
     controls: &ReprogControlsV4,
     armed: &mut Vec<ArmedControl>,
@@ -1034,7 +1119,7 @@ async fn prepare_host_change_with(
         device.root().get_feature(ChangeHostFeature::ID),
     )
     .await?
-    .ok_or_else(|| HostSwitchError::Hidpp("ChangeHost is unsupported".into()))?;
+    .ok_or(HostSwitchError::FeatureUnsupported)?;
     let change_host = device.add_feature::<ChangeHostFeature>(info.index);
     let state = timed_hidpp("reading current host", change_host.get_host_info()).await?;
     let required = host_change_required(state.current_host, state.host_count, host)?;
@@ -1047,6 +1132,19 @@ async fn prepare_host_change_with(
         host,
         required,
     })
+}
+
+async fn prepare_host_change_on(
+    channel: &Arc<HidppChannel>,
+    device_index: u8,
+    host: u8,
+) -> Result<PreparedHostChange, HostSwitchError> {
+    let mut device = timed_hidpp(
+        "opening host-change device",
+        Device::new(Arc::clone(channel), device_index),
+    )
+    .await?;
+    prepare_host_change_with(&mut device, device_index, host).await
 }
 
 async fn apply_host_change(change: PreparedHostChange) -> Result<bool, HostSwitchError> {
@@ -1147,9 +1245,10 @@ fn host_change_required(
     requested_host: u8,
 ) -> Result<bool, HostSwitchError> {
     if requested_host >= host_count {
-        return Err(HostSwitchError::Hidpp(format!(
-            "host {requested_host} is outside device host count {host_count}"
-        )));
+        return Err(HostSwitchError::HostOutOfRange {
+            host: requested_host,
+            host_count,
+        });
     }
     Ok(current_host != requested_host)
 }

@@ -315,6 +315,9 @@ impl Runtime {
             ipc::GuiUpdate::PairingUndeliverable(failure) => {
                 cx.update(|cx| windows::add_device::apply_undeliverable(cx, failure));
             }
+            ipc::GuiUpdate::FlowCommandRefused(refusal) => {
+                cx.update(|cx| windows::settings::flow_refused(cx, refusal));
+            }
             ipc::GuiUpdate::PairingCancelled => {
                 cx.update(windows::add_device::apply_cancelled);
             }
@@ -420,6 +423,7 @@ impl Runtime {
         }
         cx.update(|cx| {
             windows::add_device::apply_state(cx, snapshot.pairing.clone());
+            windows::settings::flow_status(cx, &snapshot.flow);
         });
         let (auto_download, asset_source, models) = cx.update(|cx| {
             let (changes, auto_download, asset_source, models) =

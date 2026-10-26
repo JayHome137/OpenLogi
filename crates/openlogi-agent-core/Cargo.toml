@@ -17,9 +17,33 @@ openlogi-inject = { path = "../openlogi-inject" }
 openlogi-hid = { path = "../openlogi-hid" }
 openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
+openlogi-flow = { path = "../openlogi-flow" }
+buffa = { workspace = true }
 futures-lite = { workspace = true }
+rand = { workspace = true }
+thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
+sha2 = { workspace = true }
+
+# Machine name announced to Flow peers (POSIX gethostname / Windows
+# GetComputerNameExW); already in the tree through x11rb.
+gethostname = "1.1"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+dispatch2 = { workspace = true }
+objc2 = { workspace = true }
+objc2-app-kit = { workspace = true, features = ["NSPasteboard"] }
+objc2-foundation = { workspace = true, features = ["NSArray", "NSString"] }
+
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { workspace = true, features = [
+    "Win32_Foundation",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_UI_Shell",
+] }
 
 [lints]
 workspace = true
@@ -29,4 +53,5 @@ openlogi-device = { path = "../openlogi-device", features = ["test-support"] }
 # Only to advance virtual time in the DeviceOp/timed timeout test without a
 # real multi-second sleep.
 openlogi-fixture = { workspace = true, features = ["fs"] }
+tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }

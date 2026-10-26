@@ -25,6 +25,31 @@ app_icon = "openlogi"
 # true); false switches at once.
 animate_desktop_switch = true
 
+# Cross-machine device handoff. Pairing writes the peer's pinned public key;
+# manual addresses keep Flow usable across VPNs, VLANs, and overlay networks.
+# [flow]
+# enabled = true
+# require_modifier = false
+# Share the clipboard with connected peers (default true). With false, copies
+# are neither announced to peers nor prefetched from them.
+# clipboard = true
+# UDP port Flow listens on, on every IPv6 and IPv4 address (default 42424).
+# Peers that dial this machine by manual address then need "host:port".
+# port = 42424
+#
+# [[flow.peers]]
+# name = "work-laptop"
+# public_key = "ed25519:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+# addresses = ["work-laptop.tailnet.example", "10.0.0.7"]
+#
+# [[flow.layout]]
+# edge = "right"
+# peer = "work-laptop"
+#
+# [[flow.devices]]
+# key = "unit:0f1e2d3c"
+# peer_channels = { self = 0, "work-laptop" = 1 }
+
 [devices."receiver:aabbccdd:slot:1"]
 custom_name = "Office mouse"
 dpi = 1600

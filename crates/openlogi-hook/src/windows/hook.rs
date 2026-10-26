@@ -17,7 +17,7 @@ use windows_sys::Win32::System::Threading::{
 use windows_sys::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, VIRTUAL_KEY, VK_CONTROL, VK_ESCAPE, VK_F1, VK_LWIN, VK_MENU, VK_RWIN,
-    VK_SHIFT,
+    VK_SHIFT, VK_V,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     CallNextHookEx, DispatchMessageW, GetCursorPos, GetForegroundWindow, GetMessageW,
@@ -34,8 +34,8 @@ use openlogi_core::config::FunctionKey;
 use super::cursor::{MonitorDpi, PhysicalCursorPosition};
 use super::worker::{WorkerEvent, WorkerPhase, WorkerStatus};
 use crate::{
-    ButtonId, CursorPosition, EventDisposition, ForegroundApp, HookBackend, HookError, HookEvent,
-    KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
+    ButtonId, CursorPosition, CursorSample, EventDisposition, ForegroundApp, HookBackend,
+    HookError, HookEvent, KeyEvent, KeyModifiers, MouseEvent, ScrollDelta,
 };
 
 const WHEEL_DELTA: f64 = 120.0;
@@ -170,6 +170,10 @@ impl HookBackend for Backend {
     }
 
     fn cursor_position() -> Option<CursorPosition> {
+        // The physical → DIP conversion below assumes physical input; make
+        // GetCursorPos/MonitorFromPoint answer in physical pixels regardless
+        // of the process's declared DPI awareness.
+        let _physical = openlogi_inject::PhysicalPixelScope::enter();
         let mut point = POINT { x: 0, y: 0 };
         // SAFETY: `point` is a valid writable POINT for the duration of the call.
         if unsafe { GetCursorPos(&raw mut point) } == 0 {
@@ -484,7 +488,23 @@ fn translate_event(wparam: WPARAM, data: MSLLHOOKSTRUCT) -> Option<MouseEvent> {
         }),
         WM_MOUSEMOVE => {
             let (delta_x, delta_y) = motion_delta(previous?, data.pt)?;
-            Some(MouseEvent::Moved { delta_x, delta_y })
+            Some(MouseEvent::Moved {
+                delta_x,
+                delta_y,
+                cursor: Some(CursorSample {
+                    // `MSLLHOOKSTRUCT::pt` is in per-monitor-aware (physical)
+                    // screen coordinates independent of this process's DPI
+                    // awareness; `display_rects` and `warp_cursor` query in
+                    // that same space, so Flow never mixes physical and
+                    // DPI-virtualized coordinates.
+                    position: CursorPosition {
+                        x: f64::from(data.pt.x),
+                        y: f64::from(data.pt.y),
+                    },
+                    timestamp: std::time::Instant::now(),
+                    control_down: key_held(VK_CONTROL),
+                }),
+            })
         }
         _ => None,
     }
@@ -593,6 +613,10 @@ fn translate_key(
 /// Esc/F1–F19 set. Windows numbers `VK_F1`.. consecutively.
 fn mac_keycode(vk: u32) -> Option<u16> {
     let vk = u16::try_from(vk).ok()?;
+    if vk == VK_V {
+        // kVK_ANSI_V; Flow uses this key only to observe Ctrl/Command+V.
+        return Some(0x09);
+    }
     let key = if vk == VK_ESCAPE {
         FunctionKey::Esc
     } else {
@@ -653,7 +677,8 @@ mod tests {
             translate_event(WM_MOUSEMOVE as WPARAM, at(560, 395)),
             Some(MouseEvent::Moved {
                 delta_x: 60,
-                delta_y: -5
+                delta_y: -5,
+                cursor: Some(_),
             })
         ));
         assert!(

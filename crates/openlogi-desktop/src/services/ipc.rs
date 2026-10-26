@@ -44,6 +44,9 @@ use openlogi_core::hid::{
     BacklightState, DeviceRoute, DisableKeysState, Dpi, EasySwitchHosts, FnLockState,
     ForceSensingInfo, LightCommand, PointerSpeed, ReportRateInfo, WriteError,
 };
+#[cfg(test)]
+use openlogi_ipc::FlowStatus;
+use openlogi_ipc::SavedConfig;
 use openlogi_ipc::client::{self, ConnectError};
 use openlogi_ipc::{
     AgentClient, AgentSnapshot, ClientKind, ConfigReloadError, PairingFailure, SavedConfigVerdict,
@@ -67,7 +70,8 @@ use request::LinkLost;
 #[cfg(all(target_os = "macos", debug_assertions))]
 pub use request::PollEventMonitor;
 pub use request::{
-    CancelPairing, Command, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
+    CancelPairing, Command, FlowPairCancel, FlowPairConfirm, FlowPairListen, FlowPairReject,
+    FlowPairStart, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
     ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadPointerSpeed, ReadReportRate,
     ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight,
     SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
@@ -100,6 +104,10 @@ pub(crate) enum ConfigReloadContext {
 const RECONNECT_DELAY: Duration = Duration::from_millis(250);
 
 /// What the client thread tells the GPUI loop.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the complete agent snapshot is the state update; boxing it would add a heap allocation to every observation"
+)]
 pub enum GuiUpdate {
     /// The agent's state, as of a generation this client had not seen.
     Snapshot(AgentSnapshot),
@@ -223,6 +231,9 @@ pub enum GuiUpdate {
     /// in the observed state to explain the silence. Reported locally rather
     /// than faked as a session the agent never had.
     PairingUndeliverable(PairingFailure),
+    /// A Flow pairing command the agent refused or never received; no
+    /// ceremony in the observed state explains it.
+    FlowCommandRefused(openlogi_ipc::FlowCommandError),
     /// Cancellation completed and the receiver is available for a new choice.
     PairingCancelled,
     /// Whether the receiver let a pairing go. Answers [`UnpairDevice`].
@@ -467,6 +478,10 @@ impl OwedReloads {
 }
 
 /// Why [`observe_loop`] woke up.
+#[expect(
+    clippy::large_enum_variant,
+    reason = "the observe result carries the complete snapshot and only lives across one select iteration"
+)]
 enum Woken {
     /// The observe call answered, or its connection dropped.
     Observed(Result<Option<AgentSnapshot>, RpcError>),
@@ -1257,6 +1272,7 @@ mod tests {
             pairing: None,
             foreground: ForegroundApps::default(),
             lights: Vec::new(),
+            flow: FlowStatus::default(),
         }
     }
 

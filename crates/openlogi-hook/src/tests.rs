@@ -36,6 +36,7 @@ fn mouse_event_clone_and_debug() {
         MouseEvent::Moved {
             delta_x: 3,
             delta_y: -2,
+            cursor: None,
         },
     ];
     for e in &events {
@@ -67,6 +68,7 @@ fn negate_scroll_y_flips_only_scroll_events() {
     let moved = MouseEvent::Moved {
         delta_x: 1,
         delta_y: 2,
+        cursor: None,
     };
     assert_eq!(negate_scroll_y(moved.clone()), moved);
 }

@@ -4,13 +4,16 @@
 use std::mem::size_of;
 use std::sync::{LazyLock, Mutex};
 
-use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-    INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP, MOUSEEVENTF_HWHEEL,
-    MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP,
-    MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL, MOUSEEVENTF_XDOWN,
-    MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+use windows_sys::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetThreadDpiAwarenessContext,
 };
-use windows_sys::Win32::UI::WindowsAndMessaging::{XBUTTON1, XBUTTON2};
+use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, INPUT_MOUSE, KEYBDINPUT, KEYEVENTF_KEYUP,
+    MOUSEEVENTF_HWHEEL, MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MIDDLEDOWN,
+    MOUSEEVENTF_MIDDLEUP, MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP, MOUSEEVENTF_WHEEL,
+    MOUSEEVENTF_XDOWN, MOUSEEVENTF_XUP, MOUSEINPUT, SendInput,
+};
+use windows_sys::Win32::UI::WindowsAndMessaging::{SetCursorPos, XBUTTON1, XBUTTON2};
 
 use openlogi_core::binding::{
     Action, Effect, KeyCombo, KeyboardUsage, MediaKey, MouseButton, NativeAction, Shortcut,
@@ -25,6 +28,67 @@ use keyboard_layout::ForegroundLayout;
 
 const WHEEL_DELTA: i32 = 120;
 const WHEEL_DELTA_F64: f64 = 120.0;
+
+#[expect(
+    clippy::cast_possible_truncation,
+    reason = "the range checks bound rounded coordinates to Win32 i32 screen coordinates"
+)]
+pub(super) fn warp_cursor(x: f64, y: f64) -> bool {
+    // Flow computes the target from physical monitor rectangles; make
+    // SetCursorPos read them as physical pixels too, whatever DPI awareness
+    // the process ended up with.
+    let _physical = PhysicalPixelScope::enter();
+    if !x.is_finite()
+        || !y.is_finite()
+        || x < f64::from(i32::MIN)
+        || x > f64::from(i32::MAX)
+        || y < f64::from(i32::MIN)
+        || y > f64::from(i32::MAX)
+    {
+        return false;
+    }
+    // SAFETY: both coordinates are finite and inside the Win32 screen-coordinate range.
+    unsafe { SetCursorPos(x.round() as i32, y.round() as i32) != 0 }
+}
+
+/// Runs the calling thread per-monitor-v2 DPI aware until dropped.
+///
+/// Screen-coordinate APIs (`GetMonitorInfoW`, `GetCursorPos`, `SetCursorPos`)
+/// answer in the *calling thread's* DPI awareness: physical pixels when it is
+/// per-monitor aware, DPI-virtualized logical pixels otherwise. `WH_MOUSE_LL`
+/// cursor samples are always physical, so every Flow geometry query and the
+/// arrival warp enter this scope to stay in that one space instead of
+/// depending on how (or whether) the process declared DPI awareness. The
+/// previous thread context is restored on drop. On Windows builds without
+/// per-thread awareness (before 10 1607) entering is a no-op.
+#[must_use = "the DPI awareness lasts only while the scope is alive"]
+pub struct PhysicalPixelScope {
+    previous: DPI_AWARENESS_CONTEXT,
+}
+
+impl PhysicalPixelScope {
+    /// Switch the calling thread to per-monitor-v2 awareness.
+    pub fn enter() -> Self {
+        // SAFETY: the argument is a predefined awareness context constant;
+        // the call only changes this thread's awareness and returns the
+        // previous context, or null on failure.
+        let previous =
+            unsafe { SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+        Self { previous }
+    }
+}
+
+impl Drop for PhysicalPixelScope {
+    fn drop(&mut self) {
+        if !self.previous.is_null() {
+            // SAFETY: `previous` is the context SetThreadDpiAwarenessContext
+            // returned for this same thread in `enter`.
+            unsafe {
+                SetThreadDpiAwarenessContext(self.previous);
+            }
+        }
+    }
+}
 
 static SCROLL_QUANTIZER: LazyLock<Mutex<ScrollQuantizer>> =
     LazyLock::new(|| Mutex::new(ScrollQuantizer::default()));
@@ -363,6 +427,32 @@ fn send_inputs(inputs: &[INPUT]) {
             "SendInput accepted fewer events than requested"
         );
     }
+}
+
+/// Left and right Shift, Ctrl, Alt and Windows keys.
+const MODIFIER_KEYS: [u16; 8] = [0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0x5B, 0x5C];
+/// An unassigned virtual key, pressed before a lone Windows-key release so the
+/// release does not open the Start menu.
+const VK_MASK: u16 = 0xE8;
+
+pub(super) fn release_stuck_modifiers() -> usize {
+    let stuck: Vec<u16> = MODIFIER_KEYS
+        .into_iter()
+        // SAFETY: GetAsyncKeyState takes a virtual-key code by value; a set
+        // high bit (a negative i16) means the system believes the key is down.
+        .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
+        .collect();
+    if stuck.is_empty() {
+        return 0;
+    }
+    let mut inputs = Vec::with_capacity(stuck.len() + 2);
+    if stuck.iter().any(|&vk| vk == 0x5B || vk == 0x5C) {
+        inputs.push(key_input(Key::from(VK_MASK), false));
+        inputs.push(key_input(Key::from(VK_MASK), true));
+    }
+    inputs.extend(stuck.iter().map(|&vk| key_input(Key::from(vk), true)));
+    send_inputs(&inputs);
+    stuck.len()
 }
 
 fn key_input(key: Key, key_up: bool) -> INPUT {

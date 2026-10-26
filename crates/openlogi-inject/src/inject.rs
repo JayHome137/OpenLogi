@@ -31,6 +31,8 @@ mod linux;
 
 #[cfg(target_os = "windows")]
 mod windows;
+#[cfg(target_os = "windows")]
+pub use windows::PhysicalPixelScope;
 
 #[cfg(target_os = "linux")]
 use linux as platform;
@@ -343,6 +345,41 @@ pub fn execute(action: &Action) {
                 "execute unsupported on this platform"
             );
         }
+    }
+}
+
+/// Move the system cursor to global screen coordinates on macOS or Windows.
+///
+/// Coordinates use Quartz points on macOS and physical pixels on Windows.
+/// Returns `false` for non-finite/out-of-range coordinates or native failure.
+#[must_use]
+pub fn warp_cursor(x: f64, y: f64) -> bool {
+    #[cfg(target_os = "macos")]
+    return macos::warp_cursor(x, y);
+    #[cfg(target_os = "windows")]
+    return windows::warp_cursor(x, y);
+    #[cfg(any(
+        target_os = "linux",
+        not(any(target_os = "macos", target_os = "windows"))
+    ))]
+    {
+        let _ = (x, y);
+        false
+    }
+}
+
+/// Release the modifier keys (Shift, Ctrl, Alt, Windows) the system still
+/// believes are held, and return how many there were.
+///
+/// A keyboard that switches to another computer while a modifier is down
+/// (Ctrl held to cross a screen edge, say) never sends its release here, which
+/// leaves the modifier stuck on this computer. Windows only for now; elsewhere
+/// this releases nothing.
+#[must_use]
+pub fn release_stuck_modifiers() -> usize {
+    cfg_select! {
+        target_os = "windows" => { windows::release_stuck_modifiers() }
+        _ => { 0 }
     }
 }
 

@@ -93,6 +93,30 @@ impl ConfigState {
         edit(&mut self.current)
     }
 
+    /// Take in a `[flow]` section another writer saved to `config.toml`
+    /// (the agent adding a peer it just paired, say), when that is the only
+    /// change on disk and nothing here is unsaved. Without this every later
+    /// save from this process would be refused as a conflict. Returns whether
+    /// the live config changed.
+    pub(super) fn adopt_flow_from_disk(&mut self) -> bool {
+        let ConfigPersistence::UserFile(file) = &self.persistence else {
+            return false;
+        };
+        let Ok((disk, reloaded)) = ConfigFile::load_from_path(file.path()) else {
+            return false;
+        };
+        if reloaded.revision() == file.revision() || !same_config(&self.current, &self.persisted) {
+            return false;
+        }
+        let Some(flow) = adoptable_flow(&self.persisted, &disk) else {
+            return false;
+        };
+        self.current.flow = flow.clone();
+        self.persisted.flow = flow;
+        self.persistence = ConfigPersistence::UserFile(reloaded);
+        true
+    }
+
     /// Persist the live revision, restoring the last persisted one on failure.
     pub(super) fn persist(&mut self, what: &str) -> bool {
         let result = match &mut self.persistence {
@@ -182,5 +206,77 @@ impl Deref for ConfigState {
 
     fn deref(&self) -> &Self::Target {
         &self.current
+    }
+}
+
+fn same_config(left: &Config, right: &Config) -> bool {
+    match (serde_json::to_value(left), serde_json::to_value(right)) {
+        (Ok(left), Ok(right)) => left == right,
+        _ => false,
+    }
+}
+
+/// `disk`'s `[flow]` section, when it is the only way `disk` differs from
+/// `persisted`.
+fn adoptable_flow(persisted: &Config, disk: &Config) -> Option<openlogi_core::config::FlowConfig> {
+    if disk.flow == persisted.flow {
+        return None;
+    }
+    let mut merged = persisted.clone();
+    merged.flow = disk.flow.clone();
+    same_config(&merged, disk).then(|| disk.flow.clone())
+}
+
+#[cfg(test)]
+mod tests {
+    use openlogi_core::config::FlowPeer;
+
+    use super::*;
+
+    fn with_peer(mut config: Config) -> Config {
+        config.flow.peers.push(FlowPeer {
+            name: "desk".into(),
+            public_key: format!("ed25519:{}", "ab".repeat(32)),
+            addresses: vec!["desk.local".into()],
+        });
+        config
+    }
+
+    #[test]
+    fn only_a_flow_only_change_on_disk_is_adopted() {
+        let persisted = Config::ephemeral();
+        assert!(adoptable_flow(&persisted, &persisted).is_none());
+
+        let paired = with_peer(persisted.clone());
+        assert_eq!(
+            adoptable_flow(&persisted, &paired).map(|flow| flow.peers.len()),
+            Some(1)
+        );
+
+        let mut also_other = paired;
+        also_other.app_settings.launch_at_login = !persisted.app_settings.launch_at_login;
+        assert!(adoptable_flow(&persisted, &also_other).is_none());
+    }
+
+    #[test]
+    fn a_paired_peer_saved_by_another_writer_is_taken_in_and_saves_continue() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join(openlogi_core::paths::CONFIG_FILE);
+        let (config, file) = ConfigFile::load_from_path(&path).unwrap();
+        let mut state = ConfigState::new(config, ConfigPersistence::UserFile(file));
+        assert!(state.persist("seed"));
+        assert!(!state.adopt_flow_from_disk());
+
+        // The agent pairs a peer and saves through its own handle.
+        let (disk, mut agent) = ConfigFile::load_from_path(&path).unwrap();
+        agent.save(&with_peer(disk)).unwrap();
+
+        assert!(state.adopt_flow_from_disk());
+        assert_eq!(state.flow.peers.len(), 1);
+        state.edit(|config| config.flow.require_modifier = true);
+        assert!(
+            state.persist("after adoption"),
+            "no conflict after adoption"
+        );
     }
 }

@@ -267,6 +267,12 @@ impl ConfigFile {
         Ok(())
     }
 
+    /// The file this handle loads from and saves to.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// The revision of the file as this handle loaded it or last saved it.
     /// A missing file has the revision of an empty one.
     #[must_use]

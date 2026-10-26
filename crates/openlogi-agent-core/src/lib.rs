@@ -15,6 +15,7 @@ pub mod backlight_overlay;
 pub mod capture_plan;
 mod dpi;
 pub mod event_monitor;
+pub mod flow;
 pub mod hardware;
 pub mod lock_keys;
 pub mod notices;
@@ -26,4 +27,5 @@ pub mod runtime;
 pub mod watchers;
 
 pub use dpi::{DpiCycleState, DpiCycles};
+pub use flow::FlowController;
 pub use pointer_speed::PointerSpeeds;

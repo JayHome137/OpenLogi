@@ -41,6 +41,7 @@ use crate::action_ring::ActionRingSessionSpec;
 use crate::capture_plan::{
     CapturePublication, SharedCapturePlans, hidpp_side_gesture_maps_for, plan_for_device,
 };
+use crate::flow::{FlowController, FlowDeviceSnapshot};
 use crate::hardware::{
     DeviceAccess, DeviceOp, HardwareContext, KeptOsLayouts, VolatileMouseSettings, WriteOrder,
     show_precision_led, write_pointer_speed_in_background,
@@ -165,6 +166,8 @@ pub struct SharedHandles {
     transport_turns: crate::hardware::TransportTurns,
     /// Keyboard → pointing-device routes resolved from `config.toml`.
     pub host_switch_links: HostSwitchLinks,
+    /// Flow networking and handoff runtime, armed with the agent lifecycle.
+    pub flow: FlowController,
     /// The online lights to watch for changes made on the light itself.
     pub watched_lights: WatchedLights,
     /// Orders every path's Fn-lock writes per keyboard.
@@ -636,11 +639,19 @@ impl Orchestrator {
             watch::channel(Arc::new(CapturePublication::default()));
         let (keyboard_spec_tx, keyboard_spec) = watch::channel(None);
         let (host_switch_links_tx, host_switch_links) = watch::channel(Arc::new(Vec::new()));
+        let channel_pool = hardware.channel_pool();
+        let receiver_access = ReceiverAccess::default();
+        let flow = FlowController::new(
+            config.flow.clone(),
+            Arc::clone(&observable),
+            channel_pool.clone(),
+            receiver_access.clone(),
+        );
         let (watched_lights_tx, watched_lights) = watch::channel(Arc::new(Vec::new()));
         openlogi_inject::set_desktop_switch(desktop_switch(&config.app_settings));
         let shared = SharedHandles {
             device_io: hardware.device_io(),
-            channel_pool: hardware.channel_pool(),
+            channel_pool,
             hardware,
             hook_maps: Arc::new(RwLock::new(HookMaps::default())),
             keyboard_bindings: Arc::new(RwLock::new(config.keyboard.bindings.clone())),
@@ -655,10 +666,11 @@ impl Orchestrator {
             keyboard_spec,
             keyboard_channel: Arc::new(RwLock::new(None)),
             capture_rearm_generation: Arc::new(AtomicU64::new(0)),
-            receiver_access: ReceiverAccess::default(),
+            receiver_access,
             transport_turns: crate::hardware::TransportTurns::default(),
             host_switch_links,
             watched_lights,
+            flow,
             fn_lock_order: WriteOrder::default(),
             report_rate_order: WriteOrder::default(),
             pointer_speeds: Arc::default(),
@@ -920,6 +932,19 @@ impl Orchestrator {
         publish_optional_arc_if_changed(&self.keyboard_spec_tx, self.keyboard_spec_for());
         publish_arc_if_changed(&self.watched_lights_tx, self.watched_lights());
         self.publish_lights();
+        self.shared.flow.update_devices(
+            self.devices
+                .iter()
+                .map(|device| FlowDeviceSnapshot {
+                    config_key: device.config_key.clone(),
+                    route: device.route.clone(),
+                    serial: device.serial.clone(),
+                    unit_id: device.unit_id,
+                    kind: device.kind,
+                    online: device.online,
+                })
+                .collect(),
+        );
     }
 
     fn publish_capture_plans(&self) {
@@ -1797,6 +1822,7 @@ impl Orchestrator {
         let previous_lights = self.effective_online_lights();
         let previous = std::mem::replace(&mut self.config, config);
         self.forget_saved_light_changes(&previous, source);
+        self.shared.flow.update_config(&self.config.flow);
         // Parameter-only edits must not erase a transient manual choice while
         // the light remains camera-linked. Changing the policy invalidates it.
         self.shared.scroll_preferences.publish(
