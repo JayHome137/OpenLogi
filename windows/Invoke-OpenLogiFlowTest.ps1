@@ -202,6 +202,7 @@ if (-not (Test-IsAdmin)) { throw 'Run mode needs an elevated (Administrator) Pow
 if (-not $ArtifactRunId -or -not $ExpectedSha -or $ExpectedSha -notmatch '^[0-9a-fA-F]{40}$') {
     throw 'Run mode requires -ArtifactRunId and -ExpectedSha (40-character commit SHA) for the exact build.'
 }
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 $runInfo = Invoke-RestMethod -Uri ("https://api.github.com/repos/{0}/actions/runs/{1}" -f $HT.Repo, $ArtifactRunId) -Headers @{ 'User-Agent' = 'openlogi-hwtest'; Accept = 'application/vnd.github+json' } -UseBasicParsing
 if (-not (Test-BuildRunProvenance $runInfo $ExpectedSha)) {
     throw ("Build run provenance mismatch: workflow={0}, branch={1}, status={2}, conclusion={3}, head_sha={4}; expected Build/openlogi-custom/{5}." -f $runInfo.name, $runInfo.head_branch, $runInfo.status, $runInfo.conclusion, $runInfo.head_sha, $ExpectedSha)
