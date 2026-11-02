@@ -1,3 +1,5 @@
+use std::fmt::Display;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -131,7 +133,16 @@ async fn run_outgoing(
         .handoffs
         .register_outgoing(peer.public_key, transfer_id)
         .await;
-    let Some(deadline) = request_acceptance(&connection, &peer.name, transfer_id, envelope).await
+    let Some((deadline, switched)) = accept_then_switch(
+        connection.call(envelope),
+        &peer.name,
+        transfer_id,
+        || async {
+            let _lifecycle = state.lifecycle.lock().await;
+            state.switch_devices(&targets).await
+        },
+    )
+    .await
     else {
         state.handoffs.remove_outgoing(transfer_id).await;
         return None;
@@ -140,10 +151,6 @@ async fn run_outgoing(
     // host switch runs entirely on the generation that accepted, or not at
     // all (switch_devices re-checks `is_active` under the lock and returns
     // Ok(false), which cancels the peer's pending arrival).
-    let switched = {
-        let _lifecycle = state.lifecycle.lock().await;
-        state.switch_devices(&targets).await
-    };
     match switched {
         Ok(true) => {
             // Peers see the devices gone now, not once the inventory notices.
@@ -243,13 +250,19 @@ fn release_departed_modifiers(state: &Arc<GenerationState>, targets: &[OutgoingD
     });
 }
 
-async fn request_acceptance(
-    connection: &FlowConnection,
+async fn accept_then_switch<R, E, S, SF, T>(
+    response: R,
     peer_name: &str,
     transfer_id: u64,
-    request: Envelope,
-) -> Option<Duration> {
-    let response = match tokio::time::timeout(REQUEST_TIMEOUT, connection.call(request)).await {
+    switch: S,
+) -> Option<(Duration, T)>
+where
+    R: Future<Output = Result<Envelope, E>>,
+    E: Display,
+    S: FnOnce() -> SF,
+    SF: Future<Output = T>,
+{
+    let response = match tokio::time::timeout(REQUEST_TIMEOUT, response).await {
         Ok(Ok(response)) => response,
         Ok(Err(error)) => {
             debug!(%error, peer = peer_name, "Flow handoff request failed");
@@ -287,7 +300,8 @@ async fn request_acceptance(
         );
         return None;
     }
-    Some(arm_timeout + NETWORK_SLACK)
+    let deadline = arm_timeout + NETWORK_SLACK;
+    Some((deadline, switch().await))
 }
 
 fn entry_from_crossing(crossing: EdgeCrossing) -> proto::EntryPoint {
@@ -313,97 +327,6 @@ const fn receiver_side(side: EdgeSide) -> proto::Side {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Verify the sender's Accept-before-ChangeHost invariant is enforced by code structure.
-    ///
-    /// MVP① acceptance 5 requires: no `ChangeHost` before a matching receiver acceptance.
-    /// This is enforced by `run_outgoing` (line 134-138): `request_acceptance` must return
-    /// `Some(deadline)` before `switch_devices` is called (line 145). The `request_acceptance`
-    /// function returns `None` for:
-    /// - Network timeout (line 258-260)
-    /// - RPC error (line 254-256)
-    /// - HandoffReject frame (line 263-271)
-    /// - Wrong frame kind (line 273-274)
-    /// - Decode error (line 276-278)
-    /// - Mismatched transfer_id (line 280-288)
-    /// - Zero or excessive arm_timeout (line 280-288)
-    ///
-    /// Only a valid HandoffAccept with matching transfer_id and acceptable timeout returns
-    /// `Some`, allowing `switch_devices` to proceed.
-    #[test]
-    fn sender_enforces_accept_before_change_host_by_structure() {
-        // This test documents the invariant. The logic is in `request_acceptance` returning
-        // Option<Duration>, where None means "do not switch" and Some means "proceed".
-        // Direct unit testing would require mocking FlowConnection, which is complex.
-        // The invariant is verified through:
-        // 1. Code review: request_acceptance returns None on all error/reject/timeout paths
-        // 2. Integration: existing handoff tests verify end-to-end behavior
-        // 3. This documentation: explicitly states the acceptance contract
-
-        // Positive case structure (pseudo-code from run_outgoing):
-        // let Some(deadline) = request_acceptance(...).await else {
-        //     return None;  // Early exit, no switch
-        // };
-        // switch_devices(...).await;  // Only reached if acceptance succeeded
-
-        assert!(
-            true,
-            "Accept-before-ChangeHost is structurally enforced by Option guard"
-        );
-    }
-
-    #[test]
-    fn max_peer_arm_timeout_exceeds_local_arm_timeout() {
-        // Verify the sender accepts receiver timeouts up to MAX_PEER_ARM_TIMEOUT,
-        // which must be above the receiver's ARM_TIMEOUT to avoid rejecting valid peers.
-        assert!(
-            MAX_PEER_ARM_TIMEOUT > super::super::ARM_TIMEOUT,
-            "MAX_PEER_ARM_TIMEOUT must exceed receiver's ARM_TIMEOUT"
-        );
-    }
-
-    #[test]
-    fn network_slack_is_reasonable() {
-        // Verify NETWORK_SLACK provides buffer for message delivery
-        assert!(
-            NETWORK_SLACK >= Duration::from_millis(100),
-            "NETWORK_SLACK should provide reasonable network buffer"
-        );
-        assert!(
-            NETWORK_SLACK <= Duration::from_secs(10),
-            "NETWORK_SLACK should not be excessive"
-        );
-    }
-
-    /// Test that demonstrates acceptance validation logic without full integration.
-    /// The actual validation is in request_acceptance, which checks:
-    /// - transfer_id must match
-    /// - arm_timeout_ms must be non-zero
-    /// - arm_timeout_ms must not exceed MAX_PEER_ARM_TIMEOUT
-    #[test]
-    fn acceptance_validation_requirements() {
-        let valid_timeout = Duration::from_secs(5);
-        let zero_timeout = Duration::ZERO;
-        let excessive_timeout = Duration::from_secs(50);
-
-        assert!(
-            !zero_timeout.is_zero() || valid_timeout > zero_timeout,
-            "zero timeout should be rejected"
-        );
-        assert!(
-            excessive_timeout > MAX_PEER_ARM_TIMEOUT,
-            "timeout of 50s should exceed MAX_PEER_ARM_TIMEOUT of 40s"
-        );
-        assert!(
-            valid_timeout < MAX_PEER_ARM_TIMEOUT && !valid_timeout.is_zero(),
-            "5s timeout should be acceptable"
-        );
-    }
-}
-
 fn random_transfer_id() -> u64 {
     loop {
         let id = rand::random();
@@ -419,4 +342,107 @@ fn unix_millis() -> u64 {
         .map_or(0, |duration| {
             u64::try_from(duration.as_millis()).unwrap_or(u64::MAX)
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use super::*;
+
+    fn acceptance(transfer_id: u64) -> Envelope {
+        message_envelope(
+            FrameKind::HandoffAccept,
+            &proto::HandoffAccept {
+                transfer_id,
+                arm_timeout_ms: 5_000,
+                ..Default::default()
+            },
+        )
+        .expect("acceptance envelope")
+    }
+
+    fn rejection() -> Envelope {
+        message_envelope(FrameKind::HandoffReject, &proto::HandoffReject::default())
+            .expect("rejection envelope")
+    }
+
+    async fn switch_spy(calls: Arc<AtomicUsize>) {
+        calls.fetch_add(1, Ordering::SeqCst);
+        tokio::task::yield_now().await;
+    }
+
+    #[tokio::test]
+    async fn matching_acceptance_calls_sender_switch() {
+        let switch_calls = Arc::new(AtomicUsize::new(0));
+        let outcome = accept_then_switch(
+            async { Ok::<_, std::io::Error>(acceptance(42)) },
+            "peer",
+            42,
+            || switch_spy(Arc::clone(&switch_calls)),
+        )
+        .await;
+
+        assert_eq!(
+            outcome.map(|(deadline, ())| deadline),
+            Some(Duration::from_secs(7))
+        );
+        assert_eq!(switch_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn rejection_does_not_call_sender_switch() {
+        let switch_calls = Arc::new(AtomicUsize::new(0));
+        let outcome = accept_then_switch(
+            async { Ok::<_, std::io::Error>(rejection()) },
+            "peer",
+            42,
+            || switch_spy(Arc::clone(&switch_calls)),
+        )
+        .await;
+
+        assert_eq!(outcome, None);
+        assert_eq!(switch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn acceptance_timeout_does_not_call_sender_switch() {
+        let switch_calls = Arc::new(AtomicUsize::new(0));
+        let switch_spy_calls = Arc::clone(&switch_calls);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let request = tokio::spawn(async move {
+            accept_then_switch(
+                async {
+                    let _ = started_tx.send(());
+                    tokio::time::sleep(REQUEST_TIMEOUT * 2).await;
+                    Ok::<_, std::io::Error>(acceptance(42))
+                },
+                "peer",
+                42,
+                || switch_spy(switch_spy_calls),
+            )
+            .await
+        });
+        started_rx.await.expect("request started");
+        tokio::time::advance(REQUEST_TIMEOUT + Duration::from_millis(1)).await;
+        let outcome = request.await.expect("request task");
+
+        assert_eq!(outcome, None);
+        assert_eq!(switch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn mismatched_transfer_id_does_not_call_sender_switch() {
+        let switch_calls = Arc::new(AtomicUsize::new(0));
+        let outcome = accept_then_switch(
+            async { Ok::<_, std::io::Error>(acceptance(43)) },
+            "peer",
+            42,
+            || switch_spy(Arc::clone(&switch_calls)),
+        )
+        .await;
+
+        assert_eq!(outcome, None);
+        assert_eq!(switch_calls.load(Ordering::SeqCst), 0);
+    }
 }
