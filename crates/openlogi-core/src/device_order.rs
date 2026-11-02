@@ -203,6 +203,13 @@ impl DeviceStableId {
         })
     }
 
+    /// The device identity fragment after a direct route prefix, or `None`
+    /// when `key` is not a structurally valid direct device key.
+    #[must_use]
+    pub fn direct_identity_of_key(key: &str) -> Option<&str> {
+        direct_identity_fragment(key)
+    }
+
     /// Stable key for persisted per-physical-device configuration.
     ///
     /// Receiver-connected devices are identified by receiver UID + pairing
