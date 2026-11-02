@@ -712,3 +712,79 @@ fn no_trigger_on_internal_shared_edge_in_multi_display() {
         "exposed outer edge should trigger"
     );
 }
+
+#[test]
+fn modifier_rearm_requires_fresh_dwell() {
+    // MVP① acceptance 4: modifier change that re-arms a side must require fresh dwell.
+    // Start contact on left edge, change armed_sides to disarm left, then re-arm left.
+    // The re-armed edge must NOT trigger based on the old contact; must satisfy dwell again.
+    let edges = ExposedEdges::from_displays(&[rect(0.0, 0.0, 1920.0, 1080.0)]);
+    let mut detector = EdgeDetector::new(
+        edges,
+        ArmedSides::ALL,
+        EdgeDetectorParams {
+            dwell_time: Duration::from_millis(200),
+            arrival_velocity_threshold: 10_000.0,
+            cooldown: Duration::from_millis(100),
+            ..EdgeDetectorParams::default()
+        },
+    );
+
+    // Start approaching left edge at t=0
+    assert!(detector.update(point(0.0, 500.0), Duration::ZERO).is_none());
+    assert!(
+        detector
+            .update(point(0.0, 500.0), Duration::from_millis(100))
+            .is_none()
+    );
+
+    // At t=100, disarm left side (modifier released)
+    detector.set_armed_sides(ArmedSides::from_sides([
+        EdgeSide::Right,
+        EdgeSide::Top,
+        EdgeSide::Bottom,
+    ]));
+
+    // Stay on edge; even after original dwell would complete, should not trigger (left unarmed)
+    assert!(
+        detector
+            .update(point(0.0, 500.0), Duration::from_millis(200))
+            .is_none()
+    );
+    assert!(
+        detector
+            .update(point(0.0, 500.0), Duration::from_millis(300))
+            .is_none()
+    );
+
+    // At t=300, re-arm left side (modifier pressed again) WITHOUT moving away
+    detector.set_armed_sides(ArmedSides::ALL);
+
+    // Still at edge. Old contact started at t=0 but was interrupted.
+    // New contact starts at first update after re-arm: t=350
+    // Fresh dwell from t=350 means we need to wait until t=550 (350+200)
+    assert!(
+        detector
+            .update(point(0.0, 500.0), Duration::from_millis(350))
+            .is_none(),
+        "re-armed edge should not trigger immediately with stale contact"
+    );
+    assert!(
+        detector
+            .update(point(0.0, 500.0), Duration::from_millis(450))
+            .is_none()
+    );
+    assert!(
+        detector
+            .update(point(0.0, 500.0), Duration::from_millis(549))
+            .is_none()
+    );
+
+    // At t=550, fresh dwell from re-arm completes (350+200)
+    assert!(
+        detector
+            .update(point(0.0, 500.0), Duration::from_millis(550))
+            .is_some(),
+        "should trigger after fresh dwell from re-arm completes"
+    );
+}
