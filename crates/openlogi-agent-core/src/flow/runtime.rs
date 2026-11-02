@@ -1354,10 +1354,8 @@ fn runtime_devices(
 /// or `unit:…`, bare or after a `direct:<vid>:<pid>:` route prefix. Its kind
 /// is unknown until the device is seen.
 fn absent_snapshot(key: &str) -> Option<FlowDeviceSnapshot> {
-    let fragment = key
-        .strip_prefix("direct:")
-        .and_then(|rest| rest.splitn(3, ':').nth(2))
-        .unwrap_or(key);
+    let fragment =
+        openlogi_core::device_order::DeviceStableId::direct_identity_of_key(key).unwrap_or(key);
     let (serial, unit_id) = if let Some(serial) = fragment.strip_prefix("serial:") {
         if serial.is_empty() {
             return None;

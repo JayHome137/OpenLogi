@@ -46,7 +46,6 @@ impl FlowDeviceSnapshot {
 fn device_category(kind: DeviceKind) -> proto::DeviceCategory {
     match kind {
         DeviceKind::Mouse => proto::DeviceCategory::Mouse,
-        DeviceKind::Keyboard | DeviceKind::Numpad => proto::DeviceCategory::Keyboard,
         DeviceKind::Trackball => proto::DeviceCategory::Trackball,
         DeviceKind::Touchpad => proto::DeviceCategory::Touchpad,
         DeviceKind::Presenter => proto::DeviceCategory::Presenter,
@@ -58,6 +57,13 @@ fn device_category(kind: DeviceKind) -> proto::DeviceCategory {
         | DeviceKind::Camera
         | DeviceKind::Unknown
         | DeviceKind::Light => proto::DeviceCategory::Other,
+        kind => {
+            if kind.is_keyboard_family() {
+                proto::DeviceCategory::Keyboard
+            } else {
+                proto::DeviceCategory::Other
+            }
+        }
     }
 }
 
