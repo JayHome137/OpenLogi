@@ -71,10 +71,11 @@ pub use request::PollEventMonitor;
 pub use request::{
     CancelPairing, Command, FlowPairCancel, FlowPairConfirm, FlowPairListen, FlowPairReject,
     FlowPairStart, LoadConfig, PairDevice, ReadBacklight, ReadDisableKeys, ReadDpi,
-    ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadPointerSpeed, ReadReportRate,
-    ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt, SetBacklight,
-    SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight, SetLightManualPower, SetLighting,
-    SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing, UnpairDevice,
+    ReadEasySwitchHosts, ReadFnLock, ReadForceSensing, ReadOnboard, ReadPointerSpeed,
+    ReadReportRate, ReadSmartShift, ReloadConfig, RenameEasySwitchHost, RequestAccessibilityPrompt,
+    SetBacklight, SetDisableKeys, SetDpi, SetFnLock, SetForceSensing, SetLight,
+    SetLightManualPower, SetLighting, SetPointerSpeed, SetReportRate, SetSmartShift, StartPairing,
+    UnpairDevice,
 };
 
 /// Complete identity of one Disable Keys write/reload transaction.

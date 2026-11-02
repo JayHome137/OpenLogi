@@ -44,10 +44,10 @@ use openlogi_core::hid::{
     BacklightChange, BacklightControls, BacklightDuration, BacklightMode, BacklightState,
     BacklightStatus, Click, DeviceRoute, DisableKeysMask, DisableKeysState, Dpi, DpiCapabilities,
     DpiInfo, EasySwitchHosts, EasySwitchSlot, FnLockState, ForceSensingInfo, HidppFeatureErrorKind,
-    HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, PasskeyMethod,
-    ReceiverSelector, ReportRate, ReportRateInfo, ScrollReportingTarget, ScrollWheelMode,
-    SmartShiftAutoDisengage, SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque,
-    WriteError,
+    HidppOperation, HostConnection, HostOsInfo, HostOsKind, LightCommand, OnboardMode,
+    OnboardProfile, OnboardState, PasskeyMethod, ProfileIndex, ReceiverSelector, ReportRate,
+    ReportRateInfo, ScrollReportingTarget, ScrollWheelMode, SmartShiftAutoDisengage,
+    SmartShiftMode, SmartShiftStatus, SmartShiftThreshold, TunableTorque, WriteError,
 };
 use openlogi_ipc::{
     ActionRingCommandError, ActionRingInvocation, ActionRingPresentation, AgentRequest,
@@ -112,7 +112,7 @@ fn representative_smartshift_status() -> SmartShiftStatus {
 /// unreleased version and leave this pin alone (`crates/openlogi-ipc/AGENTS.md`).
 #[test]
 fn protocol_version_is_pinned() {
-    assert_eq!(PROTOCOL_VERSION, 42);
+    assert_eq!(PROTOCOL_VERSION, 43);
 }
 
 #[test]
@@ -443,21 +443,20 @@ fn lock_keys() {
     );
 }
 
-/// v42: Flow's management RPCs follow all v41 methods, so their request
-/// indices start at `0x2f`.
+/// v43: Flow's management RPCs follow the v0.8.20 onboard read method.
 #[test]
 fn flow_requests() {
-    assert_wire(&AgentRequest::FlowSetEnabled { enabled: true }, "2f01");
+    assert_wire(&AgentRequest::FlowSetEnabled { enabled: true }, "3001");
     assert_wire(
         &AgentRequest::FlowPairStart {
             address: "mac".into(),
         },
-        "30036d6163",
+        "31036d6163",
     );
-    assert_wire(&AgentRequest::FlowPairListen {}, "31");
-    assert_wire(&AgentRequest::FlowPairConfirm {}, "32");
-    assert_wire(&AgentRequest::FlowPairReject {}, "33");
-    assert_wire(&AgentRequest::FlowPairCancel {}, "34");
+    assert_wire(&AgentRequest::FlowPairListen {}, "32");
+    assert_wire(&AgentRequest::FlowPairConfirm {}, "33");
+    assert_wire(&AgentRequest::FlowPairReject {}, "34");
+    assert_wire(&AgentRequest::FlowPairCancel {}, "35");
     assert_wire(
         &AgentRequest::FlowSetLayout {
             layout: vec![FlowLayout {
@@ -465,7 +464,7 @@ fn flow_requests() {
                 peer: "mac".into(),
             }],
         },
-        "350101036d6163",
+        "360101036d6163",
     );
 }
 
@@ -762,13 +761,42 @@ fn device_inventory() {
                 pointer_scaling: true,
                 force_sensing: true,
                 disable_keys: false,
+                onboard_profiles: false,
+                button_spy: false,
             }),
             settings_revision: 7,
+            hidpp10: false,
         }],
     }];
     assert_wire(
         &inventory,
-        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010007",
+        "010d426f6c74205265636569766572fb6d04fb48c501084630304443414645010101094d58204d535452335301fb34b00001010150020001030106323134304c5a0102030400010100fb34b0fb8240000b0101010000010101010100010101010101010000000700",
+    );
+}
+
+#[test]
+fn onboard_state() {
+    assert_wire(&HidppOperation::ReadOnboard, "1c");
+    assert_wire(
+        &AgentRequest::ReadOnboard {
+            route: DeviceRoute::Bolt {
+                receiver_uid: "F00DCAFE".into(),
+                slot: 1,
+            },
+        },
+        "2f0008463030444341464501",
+    );
+    assert_wire(
+        &OnboardState {
+            mode: OnboardMode::Onboard,
+            active_profile: ProfileIndex::new(5),
+            profiles: vec![OnboardProfile {
+                index: ProfileIndex::new(5).unwrap(),
+                name: Some("Stock".into()),
+                enabled: true,
+            }],
+        },
+        "0001050105010553746f636b01",
     );
 }
 

@@ -19,16 +19,22 @@ openlogi-hook = { path = "../openlogi-hook" }
 openlogi-ipc = { path = "../openlogi-ipc" }
 openlogi-flow = { path = "../openlogi-flow" }
 buffa = { workspace = true }
+# The embedded action icons only — not the GPUI asset source.
+openlogi-ui = { path = "../openlogi-ui", default-features = false }
 futures-lite = { workspace = true }
 rand = { workspace = true }
+# The machine name announced to Flow peers.
+gethostname = "1.1"
+# The keypad LCD watcher's doubling retry delay.
+backon = { workspace = true }
+# Keypad LCD tiles: rasterize an action icon's SVG and encode it as the JPEG
+# the keypad's image write carries. resvg matches the version gpui links.
+image = { version = "0.25", default-features = false, features = ["jpeg"] }
+resvg = { version = "0.46", default-features = false }
 thiserror = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 sha2 = { workspace = true }
-
-# Machine name announced to Flow peers (POSIX gethostname / Windows
-# GetComputerNameExW); already in the tree through x11rb.
-gethostname = "1.1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = { workspace = true }
@@ -53,5 +59,7 @@ openlogi-device = { path = "../openlogi-device", features = ["test-support"] }
 # Only to advance virtual time in the DeviceOp/timed timeout test without a
 # real multi-second sleep.
 openlogi-fixture = { workspace = true, features = ["fs"] }
+# Keypad identities the orchestrator tests stand a wired keypad up from.
+openlogi-device-registry = { workspace = true }
 tempfile = "3"
 tokio = { workspace = true, features = ["test-util"] }

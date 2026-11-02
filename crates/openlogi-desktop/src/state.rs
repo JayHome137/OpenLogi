@@ -17,6 +17,7 @@ use std::collections::BTreeMap;
 
 use gpui::{App, Context, Entity, Global};
 use openlogi_core::app::{AppAliases, ForegroundApp, profile_applies_to};
+use openlogi_core::binding::GamingLayout;
 use openlogi_core::config::Config;
 use openlogi_core::device::{DeviceInventory, StandaloneDevice};
 use openlogi_core::hid::{Dpi, SmartShiftStatus};
@@ -34,7 +35,7 @@ pub use light::LightCommandStatus;
 pub(crate) use load::Load;
 pub use load::{
     BacklightLoad, DisableKeysLoad, DpiLoad, EasySwitchLoad, FnLockLoad, ForceSensingLoad,
-    PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
+    OnboardLoad, PointerSpeedLoad, ReportRateLoad, SmartShiftLoad,
 };
 
 /// Result of confirming a SmartShift write by reading the value back.
@@ -72,6 +73,7 @@ mod action_ring;
 mod agent;
 mod backlight;
 mod bindings;
+pub use bindings::BindingLayer;
 mod camera;
 mod config;
 mod device_key;
@@ -88,6 +90,7 @@ mod inventory;
 mod light;
 mod lighting;
 mod load;
+mod onboard;
 mod os_layout;
 mod pointer;
 mod pointer_speed;
@@ -249,6 +252,7 @@ impl AppState {
             state.load_current_backlight(cx);
             state.load_current_easy_switch(cx);
             state.load_current_disable_keys(cx);
+            state.load_current_onboard(cx);
         });
     }
 
@@ -291,11 +295,11 @@ impl AppState {
         let identities_changed =
             config.edit(|config| inventory::persist_identities(config, &device_list));
         let current_device = pick_initial_device(&device_list, config.selected_device());
+        let current_record = device_list.get(current_device);
         let bindings = BindingState::new(
             &config,
-            device_list
-                .get(current_device)
-                .and_then(DeviceRecord::persistent_config_key),
+            current_record.and_then(DeviceRecord::persistent_config_key),
+            current_record.and_then(|record| GamingLayout::for_model_key(&record.model_key)),
         );
         let mut state = Self {
             config,

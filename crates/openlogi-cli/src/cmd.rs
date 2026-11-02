@@ -10,6 +10,8 @@ pub mod camera;
 pub mod diag;
 pub mod fixture;
 pub mod flow;
+#[cfg(target_os = "macos")]
+mod input_monitoring;
 pub mod light;
 pub mod list;
 pub mod snapshot;
