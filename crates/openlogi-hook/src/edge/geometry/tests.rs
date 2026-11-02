@@ -122,3 +122,97 @@ fn overlapping_neighbors_merge_their_covered_spans() {
         .collect();
     assert_eq!(primary_segments, vec![(0.0, 25.0), (150.0, 200.0)]);
 }
+
+#[test]
+fn irregular_multi_display_exposes_only_outer_edges() {
+    // MVP① acceptance 1: irregular multi-display layout, only exposed edges trigger.
+    // Scenario: 3 displays in T-shape: primary at (0,0), secondary at (1920,0),
+    // third below primary at (0,1080). The internal shared edges must not be exposed.
+    let edges = ExposedEdges::from_displays(&[
+        rect(0.0, 0.0, 1920.0, 1080.0),       // primary
+        rect(1920.0, 0.0, 1920.0, 1080.0),    // right neighbor
+        rect(0.0, 1080.0, 1920.0, 1080.0),    // bottom neighbor
+    ]);
+
+    // Primary right edge: should be fully covered by the right neighbor at x=1920
+    let primary_right = edges
+        .for_side(EdgeSide::Right)
+        .filter(|s| s.coordinate == 1920.0 && s.start >= 0.0 && s.end <= 1080.0)
+        .count();
+    assert_eq!(
+        primary_right, 0,
+        "primary's right edge at x=1920 should be covered by neighbor"
+    );
+
+    // Primary bottom edge: should be fully covered by bottom neighbor at y=1080
+    let primary_bottom = edges
+        .for_side(EdgeSide::Bottom)
+        .filter(|s| s.coordinate == 1080.0 && s.start >= 0.0 && s.end <= 1920.0)
+        .count();
+    assert_eq!(
+        primary_bottom, 0,
+        "primary's bottom edge at y=1080 should be covered by bottom neighbor"
+    );
+
+    // Left edge of primary: fully exposed
+    assert_eq!(
+        side_segments(&edges, EdgeSide::Left)
+            .iter()
+            .filter(|(coord, start, end)| *coord == 0.0 && *start == 0.0 && *end == 1080.0)
+            .count(),
+        1,
+        "primary's left edge should be fully exposed"
+    );
+
+    // Right neighbor's right edge: fully exposed
+    assert_eq!(
+        side_segments(&edges, EdgeSide::Right)
+            .iter()
+            .filter(|(coord, _, _)| *coord == 3840.0) // 1920 + 1920
+            .count(),
+        1,
+        "right neighbor's right edge should be exposed"
+    );
+
+    // Bottom neighbor's bottom edge: fully exposed
+    assert_eq!(
+        side_segments(&edges, EdgeSide::Bottom)
+            .iter()
+            .filter(|(coord, _, _)| *coord == 2160.0) // 1080 + 1080
+            .count(),
+        1,
+        "bottom neighbor's bottom edge should be exposed"
+    );
+}
+
+#[test]
+fn overlapping_stacked_displays_hide_covered_portions() {
+    // MVP① acceptance 1: overlapping/stacked displays where one partially covers another.
+    // Display A: (0, 0, 1920, 1080), Display B: (1500, 500, 1920, 1080) overlapping.
+    let edges = ExposedEdges::from_displays(&[
+        rect(0.0, 0.0, 1920.0, 1080.0),
+        rect(1500.0, 500.0, 1920.0, 1080.0),
+    ]);
+
+    // Display A's right edge (x=1920) should be partially covered from y=500 to y=1080
+    let a_right_exposed: Vec<_> = edges
+        .for_side(EdgeSide::Right)
+        .filter(|s| s.coordinate == 1920.0)
+        .map(|s| (s.start, s.end))
+        .collect();
+
+    // Should have exposed portion from y=0 to y=500
+    assert!(
+        a_right_exposed.iter().any(|(start, end)| {
+            (*start - 0.0).abs() < 1e-6 && (*end - 500.0).abs() < 1e-6
+        }),
+        "display A's right edge should be exposed from y=0 to y=500"
+    );
+
+    // Display B's right edge should be fully exposed at x=3420
+    let b_right_count = edges
+        .for_side(EdgeSide::Right)
+        .filter(|s| s.coordinate == 3420.0) // 1500 + 1920
+        .count();
+    assert_eq!(b_right_count, 1, "display B's right edge should be fully exposed");
+}
