@@ -1,5 +1,7 @@
 # OpenLogi Flow 双机测试 (第 2 次) — Jay 操作步骤
 
+> **暂停：新方案落地前，禁止跑真机测试、parse-only（仅解析）、拷贝到 Temp 或卸载 Options+。历史步骤保留，但暂勿照此执行。**
+
 **.9** = Alienware (Windows), **.8** = Mac mini。全程约 30–45 分钟。
 
 ## 先知道 (还没在真机验证过)

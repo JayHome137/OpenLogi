@@ -1,5 +1,7 @@
 # OpenLogi Flow 双机硬件测试脚本 (run 2)
 
+> **暂停：新方案落地前，禁止跑真机测试、parse-only（仅解析）、拷贝到 Temp 或卸载 Options+。历史步骤保留，但暂勿照此执行。**
+
 **Jay 只需要看 [`RUNBOOK-Jay.md`](RUNBOOK-Jay.md)** (只写操作)。本文件放所有技术细节。
 改动和全部未验证项: [`CHANGES-run2.md`](CHANGES-run2.md)。允许改动的对象: [`ALLOWLIST.md`](ALLOWLIST.md) / `allowlist.json`。
 
