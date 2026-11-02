@@ -350,12 +350,12 @@ mod tests {
 
     use super::*;
 
-    fn acceptance(transfer_id: u64) -> Envelope {
+    fn acceptance(transfer_id: u64, arm_timeout_ms: u32) -> Envelope {
         message_envelope(
             FrameKind::HandoffAccept,
             &proto::HandoffAccept {
                 transfer_id,
-                arm_timeout_ms: 5_000,
+                arm_timeout_ms,
                 ..Default::default()
             },
         )
@@ -376,7 +376,7 @@ mod tests {
     async fn matching_acceptance_calls_sender_switch() {
         let switch_calls = Arc::new(AtomicUsize::new(0));
         let outcome = accept_then_switch(
-            async { Ok::<_, std::io::Error>(acceptance(42)) },
+            async { Ok::<_, std::io::Error>(acceptance(42, 5_000)) },
             "peer",
             42,
             || switch_spy(Arc::clone(&switch_calls)),
@@ -415,7 +415,7 @@ mod tests {
                 async {
                     let _ = started_tx.send(());
                     tokio::time::sleep(REQUEST_TIMEOUT * 2).await;
-                    Ok::<_, std::io::Error>(acceptance(42))
+                    Ok::<_, std::io::Error>(acceptance(42, 5_000))
                 },
                 "peer",
                 42,
@@ -435,7 +435,40 @@ mod tests {
     async fn mismatched_transfer_id_does_not_call_sender_switch() {
         let switch_calls = Arc::new(AtomicUsize::new(0));
         let outcome = accept_then_switch(
-            async { Ok::<_, std::io::Error>(acceptance(43)) },
+            async { Ok::<_, std::io::Error>(acceptance(43, 5_000)) },
+            "peer",
+            42,
+            || switch_spy(Arc::clone(&switch_calls)),
+        )
+        .await;
+
+        assert_eq!(outcome, None);
+        assert_eq!(switch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn zero_arm_timeout_does_not_call_sender_switch() {
+        let switch_calls = Arc::new(AtomicUsize::new(0));
+        let outcome = accept_then_switch(
+            async { Ok::<_, std::io::Error>(acceptance(42, 0)) },
+            "peer",
+            42,
+            || switch_spy(Arc::clone(&switch_calls)),
+        )
+        .await;
+
+        assert_eq!(outcome, None);
+        assert_eq!(switch_calls.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn excessive_arm_timeout_does_not_call_sender_switch() {
+        let switch_calls = Arc::new(AtomicUsize::new(0));
+        let arm_timeout_ms = u32::try_from(MAX_PEER_ARM_TIMEOUT.as_millis())
+            .expect("maximum peer arm timeout fits in milliseconds")
+            + 1;
+        let outcome = accept_then_switch(
+            async { Ok::<_, std::io::Error>(acceptance(42, arm_timeout_ms)) },
             "peer",
             42,
             || switch_spy(Arc::clone(&switch_calls)),
