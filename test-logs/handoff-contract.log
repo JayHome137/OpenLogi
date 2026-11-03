@@ -1,0 +1,16 @@
+### 2026-11-03 19:22:14 CST
+### cmd: env OPENLOGI_SOURCE_TREE=/workspace/OpenLogi-mvp1-edge python3 tools/test-handoff-contract.py
+
+test_case_manifest_and_gates (__main__.HandoffContract.test_case_manifest_and_gates) ... ok
+test_duplicate_transfer_not_duplicate_success (__main__.HandoffContract.test_duplicate_transfer_not_duplicate_success) ... ok
+test_empty_log_is_not_success (__main__.HandoffContract.test_empty_log_is_not_success) ... ok
+test_no_fabricated_edge_start (__main__.HandoffContract.test_no_fabricated_edge_start) ... ok
+test_pinned_source_contract (__main__.HandoffContract.test_pinned_source_contract) ... ok
+test_preserve_allowlist_exactly (__main__.HandoffContract.test_preserve_allowlist_exactly) ... ok
+test_shared_fixture_and_rotation (__main__.HandoffContract.test_shared_fixture_and_rotation) ... ok
+
+----------------------------------------------------------------------
+Ran 7 tests in 0.077s
+
+OK
+### exit=0

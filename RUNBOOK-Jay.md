@@ -1,6 +1,6 @@
 # OpenLogi Flow 双机测试 (第 2 次) — Jay 操作步骤
 
-> **暂停：新方案落地前，禁止跑真机测试、parse-only（仅解析）、拷贝到 Temp 或卸载 Options+。历史步骤保留，但暂勿照此执行。**
+> **状态：离线脚本与用例已按产品 tip 更新；本 runbook 不是本次真机授权。拷贝到 .8/.9、执行脚本或 parse-only、改设备/Flow 配置、停止或卸载 Options+，均须 Jay 另行明确授权后再进行。本次没有连接或操作真机。**
 
 **.9** = Alienware (Windows), **.8** = Mac mini。全程约 30–45 分钟。
 
@@ -19,8 +19,8 @@
 
 ---
 
-**0. 准备 (约 5 分钟)**
-- 脚本由助手拷到两台机器, **需要你另外点头授权**。
+**0. 准备 (约 5 分钟；须在另行授权后执行)**
+- 当前仅完成离线准备。未获 Jay 对本轮真机拷贝和执行的明确授权前，不要照后续步骤操作。
 - 使用对应 `openlogi-custom` 成功 Build run 的 run ID 和完整 head SHA；必须是本次要测的构建提交。启动命令显式填写 run ID/SHA，脚本会检查该 run 成功且 SHA 相符。手动下载的 zip 必须从同一 run 的 Artifacts 区下载；普通 zip 无法由脚本独立证明其来源。
 - (只给 Windows 用) 如需脚本下载，建 PAT: 在 .9 浏览器打开 https://github.com/settings/personal-access-tokens/new → Token name `openlogi-hwtest-run2`, Expiration `7 days` → Repository access 选 **Only select repositories** → 选 **JayHome137/OpenLogi** → Permissions → **Actions: Read-only** → Generate token。
 - (Mac 用) 在 **.8 浏览器**打开对应 Build run 的页面 → **Artifacts** → 下载 `OpenLogi-macos-dmg-arm64`。
@@ -39,7 +39,7 @@ sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode preflight -
 
 **3. 先启动 .9 (3–5 分钟)** — 将命令中的 `<run-id>` 和 `<40-char-sha>` 替换为本次 Build run 的实际值。**关掉 Options+ 窗口；如果还卡在这里，右下角托盘里右键 Options+ 图标 > 退出** (窗口还开着时脚本停在 GATE W0, 关好按回车)。在 .9 的管理员窗口粘贴:
 ```
-Set-ExecutionPolicy -Scope Process Bypass -Force; & "$env:LOCALAPPDATA\Temp\ol-hwtest\windows\Invoke-OpenLogiFlowTest.ps1" -Mode Run -ArtifactRunId <run-id> -ExpectedSha <40-char-sha>
+Set-ExecutionPolicy -Scope Process Bypass -Force; & "$env:LOCALAPPDATA\Temp\ol-hwtest\windows\Invoke-OpenLogiFlowTest.ps1" -Mode Run -ArtifactRunId <run-id> -ExpectedBranch feat/twindesk-mvp1-edge -ExpectedSha <40-char-sha>
 ```
 - 提示 PAT → 右键粘贴 (看不到字是正常的) → 回车。
 - 如果出现蓝色 **Windows 已保护你的电脑**: 点 **更多信息** → **仍要运行**, 回窗口输入 `retry` 回车。
@@ -48,7 +48,7 @@ Set-ExecutionPolicy -Scope Process Bypass -Force; & "$env:LOCALAPPDATA\Temp\ol-h
 
 **4. 再启动 .8 (5–10 分钟)** — 将 `<run-id>`、`<40-char-sha>` 和 `<artifact-path>` 换成实际值，路径用双引号括起。然后在 .8 终端粘贴命令:
 ```
-sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode run --run-id <run-id> --expected-sha <40-char-sha> --artifact "<artifact-path>"
+sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode run --run-id <run-id> --expected-branch feat/twindesk-mvp1-edge --expected-sha <40-char-sha> --artifact "<artifact-path>"
 ```
 将 `<run-id>` 和 `<40-char-sha>` 替换为所选 Build run 的实际值；`<artifact-path>` 替换为从该 run 下载的 artifact zip 路径。脚本会在修改系统前核对 Build run 成功状态和 commit SHA。
 - 如果弹 **"终端"想访问"下载"文件夹中的文件** → 点 **允许**。
@@ -67,6 +67,18 @@ sudo /bin/bash /tmp/ol-hwtest/macos/run-openlogi-flow-test.sh --mode run --run-i
 **6. 鼠标跨屏与键盘跟随 (5–8 分钟)** — 用 Logitech 真鼠标:
 .9 上光标往 **左边缘** 推 → 到 Mac; Mac 上往 **右边缘** 推 → 回 .9。每次可能要等 10–30 秒。**来回至少 3 次**。窗口里的计数会增加。做完两边各按 **回车**。
 若键盘也连接到同一 Logitech 接收器/设备组，在两台分别打开文本输入框；每次鼠标切换后输入不同短文本，确认键盘输入跟随鼠标所在端，并反向重复。记录键盘型号、连接方式和结果；没有可配置键盘则标记未测。
+
+Run 会依次打开 H01–H08 用例门，逐项依据 `handoff-cases.json` 操作并在两端记录。`pass` 仅表示人工证据待复核；条件不具备或缺少授权故障夹具时输入 `blocked`，失败输入 `fail` 会触发恢复。回车只刷新事件计数，`skip` 不算通过。
+- H01 记录设备、映射、host slot、布局并手动核实槽位；不具备条件则 blocked。
+- H02 真鼠标外露边双向各至少 3 次；核对同 transfer 的 sender/receiver 成功事件和物理设备切换。
+- H03 检查同机共享边不会切换，并记录可用的真实多屏几何布局。
+- H04 检查 dwell、持续驻边、离边后 rearm、cooldown 与 Ctrl gate 的可见行为。
+- H05 验证 Accept-before-ChangeHost 和无效响应不切换；缺少授权 trace/故障夹具则 blocked。
+- H06 分别记录 request timeout、receiver arm timeout、sender arrival-ack timeout；不能把所有 timeout 当成未切换。
+- H07 用授权且可重复的故障方法验证 switch failure cancel 与 outgoing 清理；不可观测则 blocked。
+- H08 仅用已配置 Logitech ChangeHost 键盘测试跟随；没有可测键盘则 blocked/未测。
+
+全程只以 Logitech HID++ ChangeHost 的物理设备 host slot 切换为依据；软件 KVM、远程输入注入、光标预定位或其他厂商设备不算通过。
 
 **7. 等 DONE (1–2 分钟)** — 两边自动恢复 Options+。等到出现 **DONE** 再关窗口。
 绿色 = 全部恢复好; 红色 = 有项目没恢复, 跑第 8 步。

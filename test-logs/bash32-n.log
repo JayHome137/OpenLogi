@@ -1,11 +1,1 @@
-### 2026-10-26 13:41:34 CST
-### cmd: /bin/bash -n SH_FILES
-
-ok macos/common.sh
-ok macos/run-openlogi-flow-test.sh
-ok macos/watchdog.sh
-ok macos/emergency-restore.sh
-ok macos/inject.sh
-ok macos/test-discovery.sh
-ok tools/run-offline-tests.sh
-### exit=0
+SKIP: missing /tmp/bash-3.2.57/bash

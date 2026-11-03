@@ -1,8 +1,8 @@
 # OpenLogi Flow 双机硬件测试脚本 (run 2)
 
-> **暂停：新方案落地前，禁止跑真机测试、parse-only（仅解析）、拷贝到 Temp 或卸载 Options+。历史步骤保留，但暂勿照此执行。**
+> **状态：已按产品 tip 的生产语义补齐离线覆盖、用例和证据边界。真机拷贝/运行、parse-only、设备配置或 Options+ 操作仍须 Jay 另行授权；本次没有执行或连接 .8/.9。**
 
-**Jay 只需要看 [`RUNBOOK-Jay.md`](RUNBOOK-Jay.md)** (只写操作)。本文件放所有技术细节。
+**Jay 只需要看 [`RUNBOOK-Jay.md`](RUNBOOK-Jay.md)** (只写操作)。本文件放所有技术细节。tip 生产语义覆盖矩阵见 [`COVERAGE-tip-cd1c951c.md`](COVERAGE-tip-cd1c951c.md)，逐项人工验证见 [`handoff-cases.json`](handoff-cases.json)。
 改动和全部未验证项: [`CHANGES-run2.md`](CHANGES-run2.md)。允许改动的对象: [`ALLOWLIST.md`](ALLOWLIST.md) / `allowlist.json`。
 
 - Build run ID and full commit SHA are supplied at run time; scripts reject runs that are not successful `Build` workflows at that SHA.

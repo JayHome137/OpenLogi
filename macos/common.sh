@@ -32,7 +32,20 @@ HT_OWN_MARKERS="OpenLogi-hwtest|run-openlogi-flow-test|ol-hwtest|com.openlogi.hw
 
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
 verify_build_run() {
-  printf '%s' "$1" | python3 -c 'import json,sys; d=json.load(sys.stdin); sys.exit(0 if d.get("name")=="Build" and d.get("head_branch")=="openlogi-custom" and d.get("status")=="completed" and d.get("conclusion")=="success" and d.get("head_sha","").lower()==sys.argv[1].lower() else 1)' "$2"
+  printf '%s' "$1" | python3 -c 'import json,re,sys
+try:
+ d=json.load(sys.stdin); sha,branch=sys.argv[1:]
+ ok=bool(re.fullmatch(r"[0-9a-fA-F]{40}",sha)) and bool(branch.strip()) and d.get("name")=="Build" and d.get("head_branch")==branch and d.get("status")=="completed" and d.get("conclusion")=="success" and d.get("head_sha","").lower()==sha.lower()
+except (ValueError,TypeError,AttributeError): ok=False
+sys.exit(0 if ok else 1)' "$2" "${3:-}"
+}
+verify_build_artifact() {
+  printf '%s' "$1" | python3 -c 'import json,sys
+try:
+ d=json.load(sys.stdin); a=d.get("artifacts",[]); found=[x for x in a if x.get("name")==sys.argv[1]]
+ ok=bool(sys.argv[1]) and d.get("total_count")==len(a) and len(found)==1 and found[0].get("expired") is False and found[0].get("size_in_bytes",0)>0
+except (ValueError,TypeError,AttributeError): ok=False
+sys.exit(0 if ok else 1)' "$2"
 }
 fmt_ms() {
   python3 - "${1:-0}" <<'PY'
@@ -1043,6 +1056,7 @@ outcome = {"0":"Unspecified","1":"Arrived","2":"Partial","3":"Timeout","4":"Canc
 rx = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)\s+(\w+)\s+(.*)$")
 field_rx = re.compile(r'(\w+)=("(?:\\.|[^"])*"|\S+)')
 events = []
+seen_lines = set()
 for path in sorted(glob.glob(os.path.join(state_dir, "agent*.log"))):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -1052,27 +1066,39 @@ for path in sorted(glob.glob(os.path.join(state_dir, "agent*.log"))):
                 ts, lvl, rest = m.group(1), m.group(2), m.group(3)
                 ev = next((p for p in patterns if p in rest), None)
                 if not ev: continue
-                ms = int(datetime.datetime.fromisoformat(ts.replace("Z","+00:00")).timestamp()*1000)
-                if ms < since: continue
+                try: ms = int(datetime.datetime.fromisoformat(ts.replace("Z","+00:00")).timestamp()*1000)
+                except ValueError: continue
+                if ms < since or line in seen_lines: continue
+                seen_lines.add(line)
                 fields = {a: b.strip('"') for a,b in field_rx.findall(rest)}
                 events.append((ms, lvl, ev, fields, line.rstrip()))
     except OSError:
         pass
-events.sort()
-pending = None
+events.sort(key=lambda e: (e[0], e[4]))
+counts = dict(outgoing_arrived=0, incoming_arrived=0, other_terminal=0, diagnostics=0)
+seen_transfers = set()
 for ms, lvl, ev, fields, line in events:
     local = datetime.datetime.fromtimestamp(ms/1000).astimezone().isoformat(timespec="milliseconds")
     fstr = " ".join(f"{k}={v}" for k,v in sorted(fields.items()))
     if "outcome" in fields:
         fstr += f" ({outcome.get(str(fields['outcome']), '?')})"
     print(f"EVENT\t{local}\t{lvl}\t{ev}\t{fstr}")
-    if "edge" in ev.lower():
-        pending = ms
-    if ev == "Flow handoff completed" and pending is not None:
-        print(f"TIMING\tCROSSING DURATION (sender edge->handoff completed): {ms-pending} ms start={pending} end={ms} outcome={outcome.get(str(fields.get('outcome')),'?')}")
-        pending = None
+    if ev in ("Flow handoff completed", "Flow incoming handoff finished"):
+        valid = bool(re.fullmatch(r"[1-9][0-9]*", fields.get("transfer_id", ""))) and fields.get("outcome") == "1"
+        incoming = ev == "Flow incoming handoff finished"
+        if incoming:
+            valid = valid and bool(re.fullmatch(r"[1-9][0-9]*", fields.get("arrived", ""))) and fields.get("arrived") == fields.get("requested")
+        key = (ev, fields.get("peer"), fields.get("transfer_id"))
+        if not valid: counts["other_terminal"] += 1
+        elif key not in seen_transfers:
+            counts["incoming_arrived" if incoming else "outgoing_arrived"] += 1
+            seen_transfers.add(key)
+    elif re.search(r"timed out|rejected|failed|ignored|cancelled|invalid|panicked", ev):
+        counts["diagnostics"] += 1
     if ev == "Flow incoming handoff finished":
-        print(f"TIMING\tRECEIVER arrival: outcome={outcome.get(str(fields.get('outcome')),'?')} arrived={fields.get('arrived')} requested={fields.get('requested')} at={ms}")
+        print(f"TIMING\tRECEIVER result: transfer_id={fields.get('transfer_id')} outcome={outcome.get(str(fields.get('outcome')),'?')} arrived={fields.get('arrived')} requested={fields.get('requested')} at={ms}")
+print("TIMING\tUNAVAILABLE: sender edge->handoff completed; tip has no correlated edge/Accept/ChangeHost start event. Use authorized hardware trace; never time from edge ignored.")
+print("SUMMARY\t" + " ".join(f"{k}={v}" for k,v in counts.items()))
 PY
 }
 set_openlogi_flow_layout() {

@@ -52,13 +52,13 @@ AfterAll { Remove-Item -LiteralPath $script:TestRoot -Recurse -Force -ErrorActio
 Describe 'StrictMode helpers (run-1 crash class)' {
     It 'accepts only a successful Build run on openlogi-custom at the expected commit' {
         $run = [pscustomobject]@{ name = 'Build'; head_branch = 'openlogi-custom'; status = 'completed'; conclusion = 'success'; head_sha = ('a' * 40) }
-        Test-BuildRunProvenance $run ('A' * 40) | Should -BeTrue
+        Test-BuildRunProvenance $run ('A' * 40) 'openlogi-custom' | Should -BeTrue
         $run.head_branch = 'master'
-        Test-BuildRunProvenance $run ('A' * 40) | Should -BeFalse
+        Test-BuildRunProvenance $run ('A' * 40) 'openlogi-custom' | Should -BeFalse
         $run.head_branch = 'openlogi-custom'; $run.conclusion = 'failure'
-        Test-BuildRunProvenance $run ('A' * 40) | Should -BeFalse
+        Test-BuildRunProvenance $run ('A' * 40) 'openlogi-custom' | Should -BeFalse
         $run.conclusion = 'success'
-        Test-BuildRunProvenance $run ('b' * 40) | Should -BeFalse
+        Test-BuildRunProvenance $run ('b' * 40) 'openlogi-custom' | Should -BeFalse
     }
     It 'Get-Count handles $null, scalar, array' {
         Get-Count $null | Should -Be 0
@@ -462,5 +462,64 @@ Describe 'Run-1 state compatibility' {
         $s.HardCapMs | Should -Be 0
         @($s.Actions.tasksDisabled).Count | Should -Be 1
         @($s.Actions.firewallRules).Count | Should -Be 0
+    }
+}
+
+Describe 'tip handoff evidence and Build guards (offline only)' {
+    It 'accepts explicitly selected tip branch and fails closed on missing metadata' {
+        $run = @{ name='Build'; head_branch='feat/twindesk-mvp1-edge'; status='completed'; conclusion='success'; head_sha=('a' * 40) }
+        Test-BuildRunProvenance $run ('a' * 40) 'feat/twindesk-mvp1-edge' | Should -BeTrue
+        Test-BuildRunProvenance $run ('a' * 40) 'openlogi-custom' | Should -BeFalse
+        Test-BuildRunProvenance $run ('a' * 40) '' | Should -BeFalse
+        Test-BuildRunProvenance $run 'a' 'feat/twindesk-mvp1-edge' | Should -BeFalse
+        Test-BuildRunProvenance @{} ('a' * 40) 'feat/twindesk-mvp1-edge' | Should -BeFalse
+        Test-BuildRunProvenance $null ('a' * 40) 'feat/twindesk-mvp1-edge' | Should -BeFalse
+        $run.name='CI'
+        Test-BuildRunProvenance $run ('a' * 40) 'feat/twindesk-mvp1-edge' | Should -BeFalse
+        $run.name='Build'; $run.status='in_progress'
+        Test-BuildRunProvenance $run ('a' * 40) 'feat/twindesk-mvp1-edge' | Should -BeFalse
+    }
+    It 'rejects successful empty Build, expired, ambiguous, wrong and incomplete artifacts' {
+        $a = @{ name='OpenLogi-windows-x86_64'; expired=$false; size_in_bytes=100 }
+        $listing = @{ total_count=1; artifacts=@($a) }
+        Test-BuildArtifact $listing $a.name | Should -BeTrue
+        Test-BuildArtifact @{total_count=0;artifacts=@()} $a.name | Should -BeFalse
+        Test-BuildArtifact $listing 'OpenLogi-macos-dmg-arm64' | Should -BeFalse
+        $a.expired=$true
+        Test-BuildArtifact $listing $a.name | Should -BeFalse
+        $a.expired=$false; $a.size_in_bytes=0
+        Test-BuildArtifact $listing $a.name | Should -BeFalse
+        $a.size_in_bytes=100; $listing.total_count=2
+        Test-BuildArtifact $listing $a.name | Should -BeFalse
+        $listing.artifacts=@($a,$a)
+        Test-BuildArtifact $listing $a.name | Should -BeFalse
+        Test-BuildArtifact @{} $a.name | Should -BeFalse
+    }
+    It 'classifies shared fixture, filters timestamps and does not count failure or duplicates as Arrived' {
+        $fixtureRoot = Join-Path $PSScriptRoot '../../tests'
+        $expect = Get-Content (Join-Path $fixtureRoot 'event-expectations.json') -Raw | ConvertFrom-Json
+        $dir = Join-Path $script:TestRoot 'agent-events'
+        New-Item -ItemType Directory -Force $dir | Out-Null
+        Copy-Item (Join-Path $fixtureRoot 'agent-events.log') (Join-Path $dir 'agent.1.log')
+        Copy-Item (Join-Path $fixtureRoot 'agent-events.log') (Join-Path $dir 'agent.2.log')
+        $script:Ctx = New-TestCtx; $script:Ctx.StateDir=$dir
+        $events = @(Get-AgentEvents $expect.since_ms)
+        $result = Get-FlowEventSummary $events
+        $result.OutgoingArrived | Should -Be $expect.outgoing_arrived
+        $result.IncomingArrived | Should -Be $expect.incoming_arrived
+        $result.OtherTerminal | Should -Be $expect.other_terminal
+        $result.Diagnostics | Should -Be $expect.diagnostics
+        @($events | Where-Object { (Get-Prop $_.Fields 'transfer_id') -eq '999' }).Count | Should -Be 0
+        $names = @($events | ForEach-Object { $_.Event })
+        foreach ($event in @('Flow handoff rejected','Flow handoff request timed out','Flow host switch failed after receiver acceptance','Flow peer returned an invalid handoff acceptance','Flow arrival acknowledgment timed out','Flow handoff cancelled by peer')) {
+            $names | Should -Contain $event
+        }
+    }
+    It 'does not manufacture success from empty logs or ignored edge messages' {
+        (Get-FlowEventSummary @()).OutgoingArrived | Should -Be 0
+        $e = ConvertFrom-AgentLogLine '2026-11-03T08:00:00Z DEBUG flow: Flow edge ignored while peer is disconnected'
+        (Get-FlowEventSummary @($e)).OutgoingArrived | Should -Be 0
+        (Get-FlowEventSummary @($e)).Diagnostics | Should -Be 1
+        ConvertFrom-AgentLogLine '2026-99-03T08:00:00Z INFO flow: Flow handoff completed' | Should -BeNullOrEmpty
     }
 }

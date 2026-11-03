@@ -12,12 +12,13 @@ DIR="$(cd "$(dirname "$0")" && pwd)"
 source "$DIR/common.sh"
 
 MODE="preflight"; ARTIFACT=""; TOKEN=""; PEER_ADDRESS="192.168.1.9"; PEER_NAME=""; FLOW_EDGE="right"
-HT_RUN_ID="${HT_RUN_ID:-}"; HT_EXPECTED_SHA="${HT_EXPECTED_SHA:-}"
+HT_RUN_ID="${HT_RUN_ID:-}"; HT_EXPECTED_SHA="${HT_EXPECTED_SHA:-}"; HT_EXPECTED_BRANCH="${HT_EXPECTED_BRANCH:-}"
 RESPAWN_SEC=20; WITH_INJECT=0; PORT=42424; PAIR_ROLE="initiate"
 usage() {
   cat <<USAGE
 Usage: sudo /bin/bash $0 --mode preflight|run|restore [options]
-  --run-id ID              successful Build run on openlogi-custom (required for run)
+  --run-id ID              successful Build run with real platform artifacts (required for run)
+  --expected-branch NAME   exact Build head branch (required for run)
   --expected-sha SHA       full 40-character head SHA (required for run)
   --artifact PATH           Local artifact (.zip wrapping .dmg, or .dmg)
   --download-token TOKEN    (discouraged: visible in shell history) - without it the script asks (hidden input)
@@ -39,6 +40,7 @@ while [[ $# -gt 0 ]]; do
     --mode) MODE="$2"; shift 2 ;;
     --artifact) ARTIFACT="$2"; shift 2 ;;
     --run-id) HT_RUN_ID="$2"; shift 2 ;;
+    --expected-branch) HT_EXPECTED_BRANCH="$2"; shift 2 ;;
     --expected-sha) HT_EXPECTED_SHA="$2"; shift 2 ;;
     --download-token) TOKEN="$2"; shift 2 ;;
     --peer-address) PEER_ADDRESS="$2"; shift 2 ;;
@@ -56,7 +58,7 @@ while [[ $# -gt 0 ]]; do
     *) echo "Unknown arg: $1" >&2; usage; exit 2 ;;
   esac
 done
-export HT_PORT="$PORT" HT_LEASE_MIN HT_HARDCAP_MIN HT_RUN_ID HT_EXPECTED_SHA
+export HT_PORT="$PORT" HT_LEASE_MIN HT_HARDCAP_MIN HT_RUN_ID HT_EXPECTED_SHA HT_EXPECTED_BRANCH
 case "$PEER_ADDRESS" in *:*) PEER_TARGET="$PEER_ADDRESS" ;; *) PEER_TARGET="$PEER_ADDRESS:$PORT" ;; esac
 al_load || exit 2
 
@@ -140,11 +142,21 @@ fi
 # ---------------------------------------------------------------- run
 [[ "$MODE" == "run" ]] || { echo "Unknown mode: $MODE" >&2; exit 2; }
 is_root || { echo "run needs sudo:  sudo /bin/bash $0 --mode run" >&2; exit 2; }
-[[ -n "$HT_RUN_ID" && "${HT_EXPECTED_SHA:-}" =~ ^[[:xdigit:]]{40}$ ]] || { echo "Run mode requires --run-id and --expected-sha (40-character commit SHA) for the exact build." >&2; exit 2; }
+[[ "$HT_RUN_ID" =~ ^[0-9]+$ && -n "$HT_EXPECTED_BRANCH" && "${HT_EXPECTED_SHA:-}" =~ ^[[:xdigit:]]{40}$ ]] || { echo "Run mode requires --run-id, --expected-branch and --expected-sha (40-character commit SHA) for the exact build." >&2; exit 2; }
 RUN_INFO="$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$HT_REPO/actions/runs/$HT_RUN_ID")" || { echo "Could not verify build run $HT_RUN_ID." >&2; exit 2; }
-if ! verify_build_run "$RUN_INFO" "$HT_EXPECTED_SHA"; then
+if ! verify_build_run "$RUN_INFO" "$HT_EXPECTED_SHA" "$HT_EXPECTED_BRANCH"; then
   echo "Build run provenance mismatch; nothing was changed." >&2; exit 2
 fi
+ARTIFACT_INFO="$(curl -fsSL -H 'Accept: application/vnd.github+json' "https://api.github.com/repos/$HT_REPO/actions/runs/$HT_RUN_ID/artifacts?per_page=100")" || exit 2
+HT_ARTIFACT_NAME="$HT_ARTIFACT_ARM64"; [[ "$(uname -m)" != x86_64 ]] || HT_ARTIFACT_NAME="$HT_ARTIFACT_X86"
+verify_build_artifact "$ARTIFACT_INFO" "$HT_ARTIFACT_NAME" || { echo "Required Build artifact missing, expired, ambiguous or listing incomplete; nothing was changed." >&2; exit 2; }
+CASE_ROWS="$(python3 - "$DIR/../handoff-cases.json" <<'PYCASES'
+import json,sys
+cases=json.load(open(sys.argv[1],encoding="utf-8"))["cases"]
+assert len(cases)==8
+for c in cases: print("\t".join(c[k] for k in ("id","title","instructions")))
+PYCASES
+)" || exit 2
 init_context "$(console_user)"
 [[ -n "$HT_TARGET_USER" && "$HT_TARGET_USER" != root && "$HT_TARGET_USER" != loginwindow ]] || { show_failed "No logged-in console user (log in on the Mac screen first)."; exit 1; }
 if [[ -f "$(state_path)" || -f "$HT_WATCHDOG_PLIST" ]]; then
@@ -179,6 +191,10 @@ on_exit() {
     elif [[ $rc -ne 0 ]]; then
       show_failed "脚本出错 (exit $rc) - 见上面的 ERROR 行"
     fi
+    # Preserve parsed evidence even on fail/abort before restore removes temporary agent logs.
+    if [[ -n "${MEASURE_START:-}" ]]; then
+      parse_agent_events "$MEASURE_START" | while IFS= read -r evidence; do write_r EVIDENCE "$evidence"; done
+    fi
     local ok=1
     full_restore "main end (exit $rc)" || ok=0
     local col=green; [[ $ok -eq 1 && "$HT_DIFF_RESULT" != FAIL && $rc -eq 0 ]] || col=red
@@ -202,7 +218,7 @@ HT_ARMED=1
 
 section "OpenLogi Flow HW test START (macOS, run 2)"
 write_r INFO "host=$(hostname) user=$HT_TARGET_USER port=$PORT edge=$FLOW_EDGE peer=$PEER_TARGET lease=${HT_LEASE_MIN}min hardcap=${HT_HARDCAP_MIN}min allowlist=$HT_ALLOWLIST"
-write_r INFO "build: run $HT_RUN_ID expected commit $HT_EXPECTED_SHA (UNSIGNED; select local artifact from this exact run)"
+write_r INFO "build: run $HT_RUN_ID expected commit $HT_EXPECTED_SHA branch $HT_EXPECTED_BRANCH (UNSIGNED; select local artifact from this exact run)"
 
 section "PRE-SNAPSHOT"
 write_r INFO "Pre-snapshot: $(take_snapshot "$HT_WORK/snapshot-pre.json") items -> $HT_WORK/snapshot-pre.json"
@@ -419,28 +435,33 @@ if [[ "$WITH_INJECT" -eq 1 ]]; then
   [[ -f "$INJ_OUT" ]] && write_r INFO "Injection probe: $(cat "$INJ_OUT")"
 fi
 measure_check() {
-  local ev o i b
-  ev="$(parse_agent_events "$MEASURE_START" 2>/dev/null || true)"
-  o="$(printf '%s\n' "$ev" | grep -c $'\tFlow handoff completed\t' || true)"
-  i="$(printf '%s\n' "$ev" | grep -c $'\tFlow incoming handoff finished\t' || true)"
-  b="$(printf '%s\n' "$ev" | grep '^EVENT' | grep -c -E 'timed out|rejected|failed|ignored|cancelled|invalid' || true)"
-  echo "Mac->Alienware 完成 $o 次 | Alienware->Mac 到达 $i 次 | 失败/忽略 $b 次"
-  return 0
+  parse_agent_events "$CASE_START" | sed -n 's/^SUMMARY[[:space:]]/Arrived only (not hardware PASS): /p'
+  return 1  # Enter refreshes; only an explicit command records the manual verdict.
 }
-gate "GATE M5 (两台机器): 鼠标跨屏与键盘跟随" "gate-m5-measure" 5 0 "" measure_check -- \
-  "用 Logitech 真鼠标 (不要用触控板/别的鼠标):" \
-  "  1) 在 Mac 上把光标一直往【右边缘】推 -> 光标应出现在 Alienware 屏幕上 (蓝牙切换常要 10-30 秒)。" \
-  "  2) 在 Alienware 上把光标一直往【左边缘】推 -> 回到 Mac。" \
-  "  至少来回 3 次。状态行会显示已检测到的次数。" \
-  "  3) 若测试键盘已连接到同一 Logitech 接收器/设备组，在两台上分别打开文本输入框；鼠标切换后在当前端输入唯一短文本，确认键盘输入跟随鼠标所在端，反向再测一次。" \
-  "  4) 记录键盘型号、连接方式、两端结果；若没有可配置键盘，明确记为未测试。" \
-  "做完后在【本窗口】按回车结束测量 (Windows 窗口也按回车)。"
+while IFS=$'\t' read -r case_id case_title case_instructions; do
+  CASE_START="$(now_ms)"
+  write_r GATE "HWCASE BEGIN $case_id"
+  gate "GATE M5 / $case_id: $case_title" "hwcase-$case_id" 5 0 "pass blocked fail" measure_check --     "$case_instructions"     "两端同步按 RUNBOOK 第 6 步执行。pass=已实测且证据齐全；blocked/skip=未测；fail/abort=立即恢复。回车只刷新计数。"     "Accept-before-ChangeHost 及 cancel/outgoing 内部状态无完整生产日志；无授权 trace/故障夹具时必须 blocked。可选 inject 不是通过标准。"
+  if [[ "$GATE_RESULT" == pass && "$case_id" == H02 ]]; then
+    counts="$(parse_agent_events "$CASE_START" | sed -n 's/^SUMMARY[[:space:]]//p')"
+    if ! printf '%s' "$counts" | python3 -c 'import sys; d=dict(x.split("=") for x in sys.stdin.read().split()); sys.exit(0 if int(d.get("outgoing_arrived",0))>=3 and int(d.get("incoming_arrived",0))>=3 and int(d.get("other_terminal",0))==0 else 1)'; then
+      GATE_RESULT=blocked; write_r WARN "H02 needs >=3 distinct Arrived in EACH direction on this host."
+    fi
+  fi
+  verdict=BLOCKED
+  [[ "$GATE_RESULT" != pass ]] || verdict=PASS-MANUAL
+  [[ "$GATE_RESULT" != fail ]] || verdict=FAIL
+  write_r GATE "HWCASE $case_id: $verdict; evidence must be reviewed with both host logs."
+  [[ "$GATE_RESULT" != fail ]] || { write_r ERROR "Hardware case failed: $case_id"; exit 1; }
+done <<<"$CASE_ROWS"
+write_r WARN "HWTEST VERDICT: NOT AUTOMATICALLY PASSED. Review every HWCASE and restore results; BLOCKED/skip is not PASS."
 
 section "FLOW EVENTS (from agent log)"
 parse_agent_events "$MEASURE_START" 2>/dev/null | while IFS=$'\t' read -r kind a b c d; do
   case "$kind" in
     EVENT) write_r EVENT "$a $b \"$c\" $d" ;;
     TIMING) write_r TIMING "$a" ;;
+    SUMMARY) write_r INFO "$a" ;;
   esac
 done || true
 write_r INFO "Final flow status: $(cli flow status 2>&1 | tr '\n' ' ' || true)"

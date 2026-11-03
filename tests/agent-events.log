@@ -1,0 +1,27 @@
+fixture noise: these are SYNTHETIC parser records, not hardware evidence
+2026-11-02T08:00:00.000Z INFO agent: Flow handoff completed peer="Mac mini" transfer_id=1 outcome=1
+2026-99-03T08:00:00.000Z INFO agent: Flow handoff completed transfer_id=999 outcome=1
+2026-11-03T08:00:00.000Z INFO agent: Flow runtime armed
+2026-11-03T08:00:01.000Z DEBUG agent: Flow edge ignored while peer is disconnected peer="Mac mini"
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff completed peer="Mac mini" transfer_id=11 outcome=1
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff completed peer="Mac mini" transfer_id=11 outcome=1
+2026-11-03T08:00:02.000Z INFO agent: Flow incoming handoff finished transfer_id=11 outcome=1 arrived=2 requested=2
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff completed peer="Mac mini" transfer_id=12 outcome=0
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff completed peer="Mac mini" transfer_id=13 outcome=2
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff completed peer="Mac mini" transfer_id=14 outcome=3
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff completed peer="Mac mini" transfer_id=15 outcome=4
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff completed peer="Mac mini" transfer_id=16 outcome=99
+2026-11-03T08:00:02.000Z INFO agent: Flow incoming handoff finished transfer_id=20 outcome=1 arrived=1 requested=2
+2026-11-03T08:00:02.000Z INFO agent: Flow incoming handoff finished transfer_id=21 outcome=1 arrived=0 requested=0
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff completed transfer_id=22
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff completed outcome=1
+2026-11-03T08:00:02.000Z INFO agent: Flow incoming handoff finished transfer_id=23 outcome=1 arrived=1
+2026-11-03T08:00:02.000Z INFO agent: Flow incoming handoff finished transfer_id=24 outcome=3 arrived=0 requested=1
+2026-11-03T08:00:02.000Z INFO agent: Flow incoming handoff finished transfer_id=25 outcome=2 arrived=1 requested=2
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff rejected reason=2
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff request timed out
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff request failed
+2026-11-03T08:00:02.000Z INFO agent: Flow peer returned an invalid handoff acceptance
+2026-11-03T08:00:02.000Z INFO agent: Flow host switch failed after receiver acceptance
+2026-11-03T08:00:02.000Z INFO agent: Flow arrival acknowledgment timed out transfer_id=30
+2026-11-03T08:00:02.000Z INFO agent: Flow handoff cancelled by peer transfer_id=31

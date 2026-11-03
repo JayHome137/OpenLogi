@@ -87,9 +87,19 @@ function Get-Prop {
 # NOTE: @($null).Count is 1 in PowerShell (5.1 and 7) - an empty command result passed as an argument arrives as $null.
 function Get-Count { param($Value) if ($null -eq $Value) { return 0 } return @($Value).Count }
 function Test-BuildRunProvenance {
-    param($RunInfo, [string]$ExpectedSha)
-    return ($RunInfo -and $RunInfo.name -eq 'Build' -and $RunInfo.head_branch -eq 'openlogi-custom' -and
-        $RunInfo.status -eq 'completed' -and $RunInfo.conclusion -eq 'success' -and $RunInfo.head_sha -ieq $ExpectedSha)
+    param($RunInfo, [string]$ExpectedSha, [string]$ExpectedBranch)
+    return ($ExpectedSha -match '^[0-9a-fA-F]{40}$' -and -not [string]::IsNullOrWhiteSpace($ExpectedBranch) -and
+        (Get-Prop $RunInfo 'name') -ceq 'Build' -and (Get-Prop $RunInfo 'head_branch') -ceq $ExpectedBranch -and
+        (Get-Prop $RunInfo 'status') -ceq 'completed' -and (Get-Prop $RunInfo 'conclusion') -ceq 'success' -and
+        (Get-Prop $RunInfo 'head_sha') -ieq $ExpectedSha)
+}
+function Test-BuildArtifact {
+    param($Listing, [string]$Name)
+    $artifacts = @(Get-Prop $Listing 'artifacts' | Where-Object { $null -ne $_ })
+    if ((Get-Prop $Listing 'total_count') -ne $artifacts.Count) { return $false }
+    $found = @($artifacts | Where-Object { (Get-Prop $_ 'name') -ceq $Name })
+    return ($Name -and $found.Count -eq 1 -and (Get-Prop $found[0] 'expired') -ceq $false -and
+        (Get-Prop $found[0] 'size_in_bytes') -gt 0)
 }
 
 # ----------------------------------------------------------------------------- logging / time
@@ -1184,7 +1194,8 @@ function ConvertFrom-AgentLogLine([string]$Line) {
     $ev = $null
     foreach ($pat in $script:FlowEventPatterns) { if ($rest.Contains($pat)) { $ev = $pat; break } }
     if (-not $ev) { return $null }
-    $ms = [DateTimeOffset]::Parse($ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal).ToUnixTimeMilliseconds()
+    try { $ms = [DateTimeOffset]::Parse($ts, [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal).ToUnixTimeMilliseconds() }
+    catch { return $null }
     $fields = @{}
     foreach ($m in @([regex]::Matches($rest, '(\w+)=("[^"]*"|\S+)'))) { $fields[$m.Groups[1].Value] = $m.Groups[2].Value.Trim('"') }
     return [pscustomobject]@{ Ms = $ms; Level = $lvl; Event = $ev; Fields = $fields; Line = $Line }
@@ -1207,7 +1218,31 @@ function Get-AgentEvents {
         }
         catch {} finally { if ($fs) { $fs.Dispose() } }
     }
-    @($res | Sort-Object Ms)
+    @($res | Sort-Object Ms, Line -Unique)
+}
+function Get-FlowEventSummary {
+    param([object[]]$Events = @())
+    $r = @{ OutgoingArrived = 0; IncomingArrived = 0; OtherTerminal = 0; Diagnostics = 0 }
+    $seen = @{}
+    foreach ($e in @($Events)) {
+        if ($null -eq $e) { continue }
+        $f = $e.Fields
+        $terminal = $e.Event -in @('Flow handoff completed', 'Flow incoming handoff finished')
+        if ($terminal) {
+            $valid = ([string](Get-Prop $f 'transfer_id') -match '^[1-9][0-9]*$') -and ([string](Get-Prop $f 'outcome') -ceq '1')
+            if ($e.Event -eq 'Flow incoming handoff finished') {
+                $arrived = [string](Get-Prop $f 'arrived'); $requested = [string](Get-Prop $f 'requested')
+                $valid = $valid -and ($arrived -match '^[1-9][0-9]*$') -and ($arrived -ceq $requested)
+            }
+            if (-not $valid) { $r.OtherTerminal++; continue }
+            $key = '{0}|{1}|{2}' -f $e.Event, (Get-Prop $f 'peer'), (Get-Prop $f 'transfer_id')
+            if ($seen.ContainsKey($key)) { continue }
+            $seen[$key] = $true
+            if ($e.Event -eq 'Flow handoff completed') { $r.OutgoingArrived++ } else { $r.IncomingArrived++ }
+        }
+        elseif ($e.Event -match 'timed out|rejected|failed|ignored|cancelled|invalid|panicked') { $r.Diagnostics++ }
+    }
+    return [pscustomobject]$r
 }
 function Format-Event($e) {
     $f = (@($e.Fields.Keys | Sort-Object | ForEach-Object { '{0}={1}' -f $_, $e.Fields[$_] })) -join ' '

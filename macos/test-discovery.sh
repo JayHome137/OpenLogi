@@ -22,9 +22,26 @@ eq()   { if [[ "$2" == "$3" ]]; then pass "$1"; else fail "$1 (want [$3] got [$2
 has()  { printf '%s\n' "$1" | grep -Fxq -- "$2"; }
 echo "bash: $BASH_VERSION"
 VALID_RUN='{"name":"Build","head_branch":"openlogi-custom","status":"completed","conclusion":"success","head_sha":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}'
-ok "accept exact successful custom Build run" verify_build_run "$VALID_RUN" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-notok "reject Build run from another branch" verify_build_run "${VALID_RUN/openlogi-custom/master}" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
-notok "reject mismatched commit SHA" verify_build_run "$VALID_RUN" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+ok "accept exact successful custom Build run" verify_build_run "$VALID_RUN" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa openlogi-custom
+notok "reject Build run from another branch" verify_build_run "${VALID_RUN/openlogi-custom/master}" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa openlogi-custom
+notok "reject mismatched commit SHA" verify_build_run "$VALID_RUN" bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb openlogi-custom
+
+
+ok "accept explicitly selected tip Build" verify_build_run "${VALID_RUN/openlogi-custom/feat\/twindesk-mvp1-edge}" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa feat/twindesk-mvp1-edge
+notok "reject missing expected branch" verify_build_run "$VALID_RUN" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+notok "reject malformed SHA" verify_build_run "$VALID_RUN" a openlogi-custom
+notok "reject missing metadata" verify_build_run '{}' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa openlogi-custom
+notok "reject in-progress Build" verify_build_run "${VALID_RUN/completed/in_progress}" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa openlogi-custom
+notok "reject failed Build" verify_build_run "${VALID_RUN/success/failure}" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa openlogi-custom
+notok "reject non-Build workflow" verify_build_run "${VALID_RUN/Build/CI}" aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa openlogi-custom
+ARTS='{"total_count":1,"artifacts":[{"name":"OpenLogi-macos-dmg-arm64","expired":false,"size_in_bytes":100}]}'
+ok "accept exact nonexpired platform artifact" verify_build_artifact "$ARTS" OpenLogi-macos-dmg-arm64
+notok "reject empty successful Build" verify_build_artifact '{"total_count":0,"artifacts":[]}' OpenLogi-macos-dmg-arm64
+notok "reject wrong artifact" verify_build_artifact "$ARTS" OpenLogi-windows-x86_64
+notok "reject expired artifact" verify_build_artifact "${ARTS/false/true}" OpenLogi-macos-dmg-arm64
+notok "reject zero size artifact" verify_build_artifact "${ARTS/100/0}" OpenLogi-macos-dmg-arm64
+notok "reject incomplete artifact page" verify_build_artifact "${ARTS/count\":1/count\":2}" OpenLogi-macos-dmg-arm64
+notok "reject malformed artifact JSON" verify_build_artifact '{' OpenLogi-macos-dmg-arm64
 
 export HT_TARGET_UID=502 HT_TARGET_USER=jayboy137 HT_HOME=/Users/jayboy137
 export HT_CONFIG_HOME=/Users/jayboy137/.config HT_STATE_HOME=/Users/jayboy137/.local/state HT_DATA_HOME=/Users/jayboy137/.local/share
