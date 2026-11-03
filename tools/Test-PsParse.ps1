@@ -1,4 +1,5 @@
-﻿# Parse-only check: no code is executed. Usage: pwsh -File tools/Test-PsParse.ps1 <file.ps1>...
+﻿# *** PAUSED: Do not run before the new plan lands. Retained for historical reference. ***
+# Parse-only check: no code is executed. Usage: pwsh -File tools/Test-PsParse.ps1 <file.ps1>...
 'PSVersion={0} Edition={1}' -f $PSVersionTable.PSVersion, $PSVersionTable.PSEdition
 $bad = 0
 foreach ($f in $args) {

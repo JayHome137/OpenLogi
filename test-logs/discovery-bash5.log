@@ -1,7 +1,24 @@
-### 2026-10-20 17:58:11 CST
+### 2026-11-03 19:22:10 CST
 ### cmd: bash macos/test-discovery.sh
 
 bash: 5.2.37(1)-release
+PASS: accept exact successful custom Build run
+PASS: reject Build run from another branch
+PASS: reject mismatched commit SHA
+PASS: accept explicitly selected tip Build
+PASS: reject missing expected branch
+PASS: reject malformed SHA
+PASS: reject missing metadata
+PASS: reject in-progress Build
+PASS: reject failed Build
+PASS: reject non-Build workflow
+PASS: accept exact nonexpired platform artifact
+PASS: reject empty successful Build
+PASS: reject wrong artifact
+PASS: reject expired artifact
+PASS: reject zero size artifact
+PASS: reject incomplete artifact page
+PASS: reject malformed artifact JSON
 PASS: allowlist loads (single source: allowlist.json)
 PASS: missing allowlist fails closed
 === launchctl discovery (info only) ===
@@ -37,7 +54,7 @@ PASS: GUI detected (exact main executable)
 PASS: LogiPluginService detected
 PASS: old 'pid command' ps format still parsed
 === kill guard (dry) ===
-2026-10-20T17:58:11+0800 [INFO] kill [test] 4242	logioptionsplus_agent	/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
+2026-11-03T19:22:11+0800 [INFO] kill [test] 4242	logioptionsplus_agent	/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/Contents/MacOS/logioptionsplus_agent
 PASS: kill allowlisted agent 4242
 PASS: refuse to kill pid 100
 PASS: refuse to kill pid 101
@@ -80,8 +97,8 @@ PASS: non-allowlisted path refused: /Applications/logioptionsplus.app
 PASS: non-allowlisted path refused: /Applications/OpenLogi.app/../logioptionsplus.app
 PASS: non-allowlisted path refused: /Applications/OpenLogi.app/
 PASS: non-allowlisted path refused: /Users/jayboy137/.config/openlogi2
-PASS: non-allowlisted path refused: /tmp/ol-hwtest-harness.1Re9IY/fake
-PASS: rm_safe refuses /tmp/ol-hwtest-harness.1Re9IY/fake
+PASS: non-allowlisted path refused: /tmp/ol-hwtest-harness.sbdBa3/fake
+PASS: rm_safe refuses /tmp/ol-hwtest-harness.sbdBa3/fake
 PASS: rm_safe really did not remove it
 PASS: dry rm log empty
 === open guard (dry) ===
@@ -144,6 +161,6 @@ PASS: abort exits 130 (EXIT trap restores)
 PASS: hard cap passed at a gate -> abort 130
 PASS: ABORT case-insensitive
 
-PASSED: 127   FAILED: 0
+PASSED: 144   FAILED: 0
 ALL HARNESS CHECKS PASSED
 ### exit=0

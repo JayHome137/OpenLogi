@@ -3,6 +3,14 @@
 日期: 2026-10-20 (Asia/Shanghai)。全部工作只在助手自己的机器上完成; **没有**连接、拷贝或运行任何东西到 Jay 的机器。
 端口 42424、build run 39235760610 @ bd04518f、布局 (Mac 在左: Windows edge=left, Mac edge=right) 均**未改动**。
 
+## 2026-10-26 安全审查修订
+
+- 以上 run ID / SHA 仅为 run 2 的历史基线，不再作为可执行脚本的默认构建。Windows/macOS Run 必须显式提供 Build run ID 与完整 SHA；脚本在系统修改前核对 workflow、分支、成功状态和 head SHA。手动下载的 zip 需要从同一 run 获取，归档文件自身没有可供脚本核验的来源证明。
+- 恢复流程不再重置 macOS TCC；原有辅助功能/输入监控授权保留，只报告权限需由用户检查。防火墙人工清理限定为本轮精确命名的规则。
+- 恢复锁超时改为停止本轮恢复，避免并发执行。
+- Windows/macOS 真机步骤加入鼠标跨屏后键盘是否跟随的双向检查，并要求记录键盘型号、连接方式及结果。
+- 本修订仍未在真实 Windows PowerShell 5.1 或硬件上执行。
+
 ## ⚠️ 未验证 (UNVERIFIED) 风险清单 — 最上面先看
 
 | # | 未验证项 | 影响 | 缓解 |
@@ -53,7 +61,7 @@
 ### 新文件
 - `allowlist.json` — 所有可改动对象的唯一机器可读清单 (见 `ALLOWLIST.md`)。
 - `ALLOWLIST.md`, `CHANGES-run2.md` (本文件), 重写 `RUNBOOK-Jay.md`, 更新 `README.md`。
-- `windows/tests/HwTest.Tests.ps1` (Pester, StrictMode Latest, 44 个测试), `windows/tests/PSScriptAnalyzerSettings.psd1`。
+- `windows/tests/HwTest.Tests.ps1` (Pester, StrictMode Latest, 45 个测试), `windows/tests/PSScriptAnalyzerSettings.psd1`。
 - `macos/testdata/`: `ps-axww-ppid.txt`, `run1-state.json`, `run1-snapshot-pre.json`, `run2-snapshot-post.json`, `flow-{prompted,paired,failed,none}.json`。
 - `tools/run-offline-tests.sh` (整套离线测试, 日志写 `test-logs/`), `tools/Test-PsParse.ps1` (只解析, 不执行)。
 

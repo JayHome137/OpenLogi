@@ -17,6 +17,9 @@
 param(
     [ValidateSet('Preflight', 'Run', 'Restore')][string]$Mode = 'Preflight',
     [string]$ArtifactZip,
+    [string]$ArtifactRunId,
+    [string]$ExpectedSha,
+    [string]$ExpectedBranch,
     [string]$DownloadToken,                    # plain string (discouraged; wiped after download)
     [SecureString]$DownloadTokenSecure,        # preferred: Read-Host -AsSecureString
     [string]$TargetUser,
@@ -33,6 +36,7 @@ param(
     [int]$MeasureWaitSec = 0,                   # DEPRECATED (run 1): ignored
     [long]$StartAtEpochMs = 0,                  # DEPRECATED (run 1): ignored, replaced by READY handshake
     [switch]$SkipInjection,
+    [switch]$WithInjection,                   # optional diagnostic only; disabled by default
     [switch]$AllowLockedSession
 )
 $ErrorActionPreference = 'Stop'
@@ -105,6 +109,7 @@ if ($WatchdogMinutes -gt 0) { $LeaseMinutes = $WatchdogMinutes; Write-Host "NOTE
 if ($HumanGateSec -gt 0 -or $MeasureWaitSec -gt 0 -or $StartAtEpochMs -gt 0) { Write-Host 'NOTE: -HumanGateSec / -MeasureWaitSec / -StartAtEpochMs are ignored in run 2 (gates wait for Enter; READY handshake replaces T0).' -ForegroundColor Yellow }
 $HT.LeaseMinutes = $LeaseMinutes
 $HT.HardCapMinutes = $HardCapMinutes
+$HT.RunId = $ArtifactRunId
 [void](Import-HwAllowlist)
 
 if ($Mode -eq 'Restore') {
@@ -117,6 +122,7 @@ if ($Mode -eq 'Restore') {
     if ($ok) { exit 0 } else { exit 3 }
 }
 
+$measureStart = 0
 $script:Ctx = New-HwContext -TargetUser $TargetUser
 $script:Ctx.Port = $Port
 $C = $script:Ctx
@@ -134,6 +140,9 @@ if ($Mode -eq 'Preflight') {
     $report['consoleSessionPresent'] = [bool](Get-ConsoleUser)
     $report['screenLocked'] = Test-ScreenLocked
     $report['resultLog'] = $C.ResultLog
+    $report['artifactRunId'] = $ArtifactRunId
+    $report['expectedSha'] = $ExpectedSha
+    $report['expectedBranch'] = $ExpectedBranch
     $report['configDir'] = $C.ConfigDir
     $report['leftoverStateFromEarlierRun'] = (Test-Path -LiteralPath $C.StatePath)
     $report['watchdogTaskExists'] = [bool](Get-ScheduledTask -TaskName $HT.WatchdogTask -TaskPath '\' -ErrorAction SilentlyContinue)
@@ -194,6 +203,18 @@ if ($Mode -eq 'Preflight') {
 
 # ----------------------------------------------------------------- RUN: pre-checks (nothing touched yet)
 if (-not (Test-IsAdmin)) { throw 'Run mode needs an elevated (Administrator) PowerShell.' }
+if ($ArtifactRunId -notmatch '^[0-9]+$' -or [string]::IsNullOrWhiteSpace($ExpectedBranch) -or -not $ExpectedSha -or $ExpectedSha -notmatch '^[0-9a-fA-F]{40}$') {
+    throw 'Run mode requires -ArtifactRunId, -ExpectedBranch and -ExpectedSha (40-character commit SHA) for the exact build.'
+}
+[Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+$runInfo = Invoke-RestMethod -Uri ("https://api.github.com/repos/{0}/actions/runs/{1}" -f $HT.Repo, $ArtifactRunId) -Headers @{ 'User-Agent' = 'openlogi-hwtest'; Accept = 'application/vnd.github+json' } -UseBasicParsing
+if (-not (Test-BuildRunProvenance $runInfo $ExpectedSha $ExpectedBranch)) {
+    throw ("Build run provenance mismatch: workflow={0}, branch={1}, status={2}, conclusion={3}, head_sha={4}; expected Build/{6}/{5}." -f $runInfo.name, $runInfo.head_branch, $runInfo.status, $runInfo.conclusion, $runInfo.head_sha, $ExpectedSha, $ExpectedBranch)
+}
+$artifactListing = Invoke-RestMethod -Uri ("https://api.github.com/repos/{0}/actions/runs/{1}/artifacts?per_page=100" -f $HT.Repo, $ArtifactRunId) -Headers @{ 'User-Agent' = 'openlogi-hwtest'; Accept = 'application/vnd.github+json' } -UseBasicParsing
+if (-not (Test-BuildArtifact $artifactListing $HT.ArtifactName)) { throw 'Required Build artifact missing, expired, ambiguous or listing incomplete; nothing was changed.' }
+$hardwareCases = (Get-Content -LiteralPath (Join-Path (Split-Path $PSScriptRoot -Parent) 'handoff-cases.json') -Raw -Encoding UTF8 | ConvertFrom-Json).cases
+if (@($hardwareCases).Count -ne 8) { throw 'Hardware case manifest missing or incomplete.' }
 if (-not $C.Profile) { Show-Failed ("Could not resolve target user profile (user '{0}'). Pass -TargetUser COMPUTER\user." -f $C.TargetUser); exit 1 }
 if (-not (Get-ConsoleUser)) { Show-Failed 'No interactive console session detected.'; exit 1 }
 if (Test-Path -LiteralPath $C.StatePath) {
@@ -239,7 +260,7 @@ try {
     '' | Set-Content -LiteralPath $C.ResultLog -Encoding UTF8 -ErrorAction SilentlyContinue
     Write-Section 'OpenLogi Flow HW test START (Windows, run 2)'
     Write-R ('host={0} user={1} port={2} edge={3} role={4} lease={5}min hardcap={6}min' -f $env:COMPUTERNAME, $C.TargetUser, $Port, $FlowEdge, $PairRole, $LeaseMinutes, $HardCapMinutes)
-    Write-R ('build: run {0} commit bd04518f, artifact {1}' -f $HT.RunId, $HT.ArtifactName)
+    Write-R ('build: run {0} expected commit {1}, artifact {2}, branch {3} (select local ZIP from this exact run)' -f $HT.RunId, $ExpectedSha, $HT.ArtifactName, $ExpectedBranch)
     Write-Banner -Color 'Yellow' -Lines @('Windows 端已开始。在本窗口出现绿色 READY 之前, 不要启动 Mac 端脚本。', (Format-LeaseStatus))
 
     Write-Section 'PRE-SNAPSHOT'
@@ -418,7 +439,7 @@ try {
 
     Write-Section 'FLOW CROSSING MEASUREMENT'
     $measureStart = Get-NowMs
-    if (-not $SkipInjection) {
+    if ($WithInjection -and -not $SkipInjection) {
         Write-R 'SendInput probe (OpenLogi drops LLMHF_INJECTED motion, so this is NOT expected to cross; real mouse needed).' 'WARN'
         $injOut = Join-Path $C.IoDir 'inject.json'
         Remove-Item -LiteralPath $injOut -ErrorAction SilentlyContinue
@@ -426,36 +447,30 @@ try {
         if (Test-Path -LiteralPath $injOut) { Write-R ('Injection probe: ' + ((Get-Content -LiteralPath $injOut -Raw).Trim())) }
     }
     $measureCheck = {
-        $ev = @(Get-AgentEvents -SinceMs $measureStart)
-        $out = @($ev | Where-Object { $_.Event -eq 'Flow handoff completed' }).Count
-        $inc = @($ev | Where-Object { $_.Event -eq 'Flow incoming handoff finished' }).Count
-        $bad = @($ev | Where-Object { $_.Event -match 'timed out|rejected|failed|ignored|cancelled|invalid' }).Count
-        @{ Done = $true; Status = ('Alienware->Mac 完成 {0} 次 | Mac->Alienware 到达 {1} 次 | 失败/忽略 {2} 次' -f $out, $inc, $bad) }
+        $stats = Get-FlowEventSummary @(Get-AgentEvents -SinceMs $caseStart)
+        @{ Done = $false; Status = ('Arrived only: sender={0} receiver={1}; other terminal={2}; diagnostics={3}. Counts are not a hardware PASS.' -f $stats.OutgoingArrived, $stats.IncomingArrived, $stats.OtherTerminal, $stats.Diagnostics) }
     }
-    [void](Wait-HumanGate -Title 'GATE W4 (两台机器): 用真鼠标来回跨屏' -Phase 'gate-measure' -Check $measureCheck -PollSec 5 -Lines @(
-            '用 Logitech 真鼠标(不要用触控板/别的鼠标):',
-            '  1) 在 Alienware 上把光标一直往【左边缘】推 -> 光标应出现在 Mac 屏幕上(蓝牙切换常要 10-30 秒)。',
-            '  2) 在 Mac 上把光标一直往【右边缘】推 -> 回到 Alienware。',
-            '  至少来回 3 次。下面的状态行会显示已检测到的次数。',
-            '做完后在【本窗口】按回车结束测量(Mac 窗口也按回车)。'))
-
+    foreach ($case in $hardwareCases) {
+        $caseStart = Get-NowMs
+        Write-R ('HWCASE BEGIN {0}' -f $case.id) 'GATE'
+        $g = Wait-HumanGate -Title ('GATE W4 / {0}: {1}' -f $case.id, $case.title) -Phase ('hwcase-' + $case.id) -Check $measureCheck -PollSec 5 -Commands @('pass', 'blocked', 'fail') -Lines @(
+            $case.instructions,
+            '两端同步按 RUNBOOK 第 6 步执行。pass=已实测且证据齐全；blocked/skip=未测；fail/abort=立即恢复。回车只刷新计数。',
+            'Accept-before-ChangeHost 及 cancel/outgoing 内部状态无完整生产日志；无授权 trace/故障夹具时必须 blocked。可选 inject 不是通过标准。')
+        if ($g -eq 'pass' -and $case.id -eq 'H02') {
+            $stats = Get-FlowEventSummary @(Get-AgentEvents -SinceMs $caseStart)
+            if ($stats.OutgoingArrived -lt 3 -or $stats.IncomingArrived -lt 3 -or $stats.OtherTerminal -gt 0) { $g = 'blocked'; Write-R 'H02 needs >=3 distinct Arrived in EACH direction on this host.' 'WARN' }
+        }
+        $verdict = 'BLOCKED'; if ($g -eq 'pass') { $verdict = 'PASS-MANUAL' }; if ($g -eq 'fail') { $verdict = 'FAIL' }
+        Write-R ('HWCASE {0}: {1}; evidence must be reviewed with both host logs.' -f $case.id, $verdict) 'GATE'
+        if ($g -eq 'fail') { throw ('Hardware case failed: ' + $case.id) }
+    }
+    Write-R 'HWTEST VERDICT: NOT AUTOMATICALLY PASSED. Review every HWCASE and restore results; BLOCKED/skip is not PASS.' 'WARN'
     Write-Section 'FLOW EVENTS (from agent log, UTC->local)'
     $events = @(Get-AgentEvents -SinceMs $measureStart)
     if ($events.Count -eq 0) { Write-R 'No Flow events found in the agent log for this window.' 'WARN' }
-    $pendingSwitch = $null
-    foreach ($e in $events) {
-        Write-R (Format-Event $e) 'EVENT'
-        if ($e.Event -eq 'Flow runtime armed') { $pendingSwitch = $null }
-        if ($e.Event -match 'edge') { $pendingSwitch = $e }
-        if ($e.Event -eq 'Flow handoff completed' -and $pendingSwitch) {
-            $dur = $e.Ms - $pendingSwitch.Ms
-            Write-R ('  CROSSING DURATION (sender edge->handoff completed): {0} ms  [start={1} end={2} outcome={3}]' -f $dur, (Format-Ms $pendingSwitch.Ms), (Format-Ms $e.Ms), $script:OutcomeNames[[string]$e.Fields['outcome']]) 'TIMING'
-            $pendingSwitch = $null
-        }
-        if ($e.Event -eq 'Flow incoming handoff finished') {
-            Write-R ('  RECEIVER arrival: outcome={0} arrived={1}/{2} at {3}' -f $script:OutcomeNames[[string]$e.Fields['outcome']], $e.Fields['arrived'], $e.Fields['requested'], (Format-Ms $e.Ms)) 'TIMING'
-        }
-    }
+    foreach ($e in $events) { Write-R (Format-Event $e) 'EVENT' }
+    Write-R 'UNAVAILABLE: sender edge->handoff completed; tip has no correlated edge/Accept/ChangeHost start event. Never time from edge ignored.' 'TIMING'
     $fsFinal = Get-CliJson @('flow', 'status')
     if ($fsFinal) { Write-R ('Final flow status: ' + ($fsFinal | ConvertTo-Json -Depth 6 -Compress)) }
 }
@@ -469,6 +484,10 @@ catch {
     Show-Failed ([string]$_.Exception.Message)
 }
 finally {
+    if ($measureStart -gt 0) {
+        try { foreach ($e in @(Get-AgentEvents -SinceMs $measureStart)) { Write-R (Format-Event $e) 'EVIDENCE' } }
+        catch { Write-R ('Evidence capture failed: ' + $_) 'WARN' }
+    }
     $rok = $false
     try { $rok = Invoke-FullRestore -Reason 'main run end' } catch { Write-R ('Restore error: ' + $_) 'ERROR' }
     Write-Section 'DONE'

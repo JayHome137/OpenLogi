@@ -45,7 +45,7 @@
 | Options+ 进程 | `logioptionsplus_agent`, `logioptionsplus_updater` (在 `/Library/Application Support/Logitech.localized/LogiOptionsPlus/logioptionsplus_agent.app/...`), `LogiPluginService`, `LogiPluginServiceNative`, `LogiPluginServiceExt` (`/Applications/Utilities/LogiPluginService.app/Contents/MacOS/`), `logioptionsplus` (`/Applications/logioptionsplus.app/Contents/MacOS/logioptionsplus`) | SIGTERM (宽限后 SIGKILL), 每次 kill 前重新核对路径 |
 | Options+ 界面 | `/Applications/logioptionsplus.app` (bundle id 回退值 `com.logi.optionsplus`, 未验证) | 测试前在跑才 `open -g` 恢复 |
 | OpenLogi 进程 | `/Applications/OpenLogi.app/Contents/MacOS/openlogi-desktop`, `.../MacOS/openlogi`, `.../LoginItems/OpenLogi Agent.app/Contents/MacOS/openlogi-agent`, `.../LoginItems/OpenLogi Overlay.app/Contents/MacOS/openlogi-overlay` | 停止 |
-| TCC 重置 | 服务 `Accessibility`, `ListenEvent` × bundle `org.openlogi.openlogi`, `org.openlogi.agent`, `org.openlogi.overlay` | `tccutil reset` (本地网络无法重置 → 报 LEFTOVER) |
+| TCC / 隐私授权 | 只读取并记录状态 | 自动恢复不重置授权；测试后只由用户手动移除本轮新增的授权 |
 | launchd 用户环境变量 | `OPENLOGI_LOG` | 测试前不存在才 unsetenv |
 | 路径 (测试前不存在才删) | `/Applications/OpenLogi.app`, `/Library/Application Support/OpenLogi-hwtest`, `{home}/Library/Application Support/OpenLogi-hwtest`, `{ConfigHome}/openlogi`, `{StateHome}/openlogi`, `{DataHome}/openlogi`, `{ConfigHome}/openlogi-dev`, `{home}/Library/Application Support/OpenLogi`, `{home}/Library/Caches/org.openlogi.openlogi`, `{home}/Library/Preferences/org.openlogi.openlogi.plist`, `/tmp/OpenLogiHwTestRestore.lock` | 删除 (已存在的目录先备份后还原) |
 | 路径 (测试创建且为空才删) | `{ConfigHome}`, `{StateHome}`, `{DataHome}`, `{home}/.local` | 删除空目录 |

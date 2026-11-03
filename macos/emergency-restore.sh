@@ -28,8 +28,8 @@ fi
 init_context "$(console_user)"
 HT_USER_WORK="$HT_HOME/Library/Application Support/OpenLogi-hwtest"
 write_r WARN "EMERGENCY RESTORE (manual) WITHOUT saved state - allowlist-only defaults"
-_mutex_take
 HT_RR_ERR=0; HT_RR_N=0; HT_RR_TEXT=""
+_mutex_take || { rr ERROR "restore mutex" "timed out after 300 s; no restore mutations were attempted"; rr_summary || true; exit 3; }
 HT_ACT_DISABLED_JSON="$(al_get launchd-optionsplus | awk -F '\t' '{print $1 "/" $2}' | python3 -c 'import json,sys; print(json.dumps([l.strip() for l in sys.stdin if l.strip()]))')"
 export HT_ACT_DISABLED_JSON HT_PLUGIN_WAS_RUNNING=1 HT_GUI_STATE_KNOWN=0
 step "stop OpenLogi" stop_openlogi
@@ -42,7 +42,7 @@ for v in $(al_get env-unset); do
 done
 if [[ $DELETE_DIRS -eq 1 ]]; then
   for d in "$HT_APP" "$HT_CONFIG_DIR" "$HT_STATE_DIR" "$HT_DATA_DIR"; do rm_safe "$d" || true; done
-  step "TCC reset" reset_tcc_for_openlogi
+  rr LEFTOVER "OpenLogi TCC permissions" "left unchanged; remove only newly added grants manually"
 else
   for d in "$HT_APP" "$HT_CONFIG_DIR" "$HT_STATE_DIR" "$HT_DATA_DIR"; do [[ -e "$d" ]] && rr LEFTOVER "keep $d" "use --delete-openlogi-dirs to remove"; done
 fi

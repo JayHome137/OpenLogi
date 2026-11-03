@@ -1,0 +1,47 @@
+{
+  "source_tip": "cd1c951cb0a2b8d33971b8cf2f87907dfa100221",
+  "source_branch": "feat/twindesk-mvp1-edge",
+  "product_boundary": "Logitech HID++ ChangeHost only; no software KVM or remote input injection",
+  "cases": [
+    {
+      "id": "H01",
+      "title": "设备、映射与观测准备",
+      "instructions": "记录 .9/.8 的 OS、屏幕布局、Logitech 鼠标/键盘型号、Bolt/Unifying/蓝牙连接、device key、双方 host slot 与 flow.devices 映射；仅写 layout 不代表设备已配置。手动 Easy-Switch 验证两个槽位后回到 sender；保留独立本机输入用于 abort。配置缺失则 fail；无设备或观测条件则 blocked。"
+    },
+    {
+      "id": "H02",
+      "title": "外露边、有效 Accept 与成功往返",
+      "instructions": "Logitech 真鼠标从 .9 左外露边切到 .8，再由 .8 右外露边切回，至少 3 个往返。每次记录 sender completed outcome=1 与同 transfer_id 的 receiver incoming finished outcome=1、arrived=requested>0，并观察物理设备已切换。记录人工边缘动作至 completed 时间及误差；它不是自动协议计时。光标预定位不能证明 ChangeHost 或设备到达。"
+    },
+    {
+      "id": "H03",
+      "title": "内共享边与真实多屏 geometry",
+      "instructions": "同一主机的两个本地显示器共享边跨越不得 ChangeHost；只有配置方向的外露段可切换。若设备具备，逐项记录错位、间隙、重叠/T 形布局；没有相应本地多屏或无法配置则 blocked，.8/.9 两台屏幕相邻不能替代同机共享边。"
+    },
+    {
+      "id": "H04",
+      "title": "dwell、cooldown、rearm 与 Ctrl gate",
+      "instructions": "按 RUNBOOK 的慢速驻边/快速到边、持续驻边不连发、离开所有 armed 边 >=12 逻辑像素再进入、500ms cooldown 与 require_modifier=true 的 Ctrl 正反例执行。250ms/900 units/s 等精确阈值靠单元测试；人工只做可见行为。只改本次 OpenLogi 测试配置并记原值；不引入跨机光标注入。"
+    },
+    {
+      "id": "H05",
+      "title": "Accept-before-ChangeHost 与无效响应不切换",
+      "instructions": "有效 Accept 完整验证后才可 ChangeHost；HandoffReject、request timeout、错 transfer_id、arm_timeout=0/>40000ms、错误帧/解码失败都不得切 host。需同 transfer 的授权协议/HID trace 或故障夹具；现有 stock Build 不提供完整时序日志，也无非法 peer CLI，缺夹具必须 blocked。flow reject 是配对拒绝，不是 HandoffReject。"
+    },
+    {
+      "id": "H06",
+      "title": "request timeout、receiver arm 与 arrival ack",
+      "instructions": "按 RUNBOOK 分开验证 2s REQUEST_TIMEOUT 无切换、receiver 30s ARM_TIMEOUT 的 Timeout/Partial、sender 自 switch 返回起等待 arm+2s（本 tip 32s，最大合法 42s）的 ack timeout；延迟/丢响应须授权夹具。断开 peer 的 edge ignored 不算 request timeout；已 Accept 后的 arrival timeout 可能已切换，不能套用超时一律不切换。"
+    },
+    {
+      "id": "H07",
+      "title": "ChangeHost 失败的 cancel 与 outgoing 清理",
+      "instructions": "仅用授权故障夹具使有效 Accept 后 ChangeHost 失败，核对 host switch failed after receiver acceptance、SwitchFailed cancel、outgoing 清理/receiver pending 取消；修复故障后 rearm 再试应成功。无公共内部状态或可重复故障方法则 blocked，单条日志或偶然拔接收器不能证明清理。多设备可能部分先切走，用手动槽位恢复。"
+    },
+    {
+      "id": "H08",
+      "title": "键盘随 Logi host slot 跟随",
+      "instructions": "键盘须是已配置的 Logitech ChangeHost 设备且双方槽位有效；同接收器不保证自动跟随。每次鼠标切换后在目标端本地输入框输入唯一文本，反向重复并检查 Ctrl 不残留。没有可配置键盘记 blocked/未测；可选 inject、远程桌面或其他厂商设备不能代替。"
+    }
+  ]
+}

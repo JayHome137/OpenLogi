@@ -17,7 +17,7 @@ HT_APP_BUNDLE_ID="org.openlogi.openlogi"
 HT_AGENT_SERVICE="org.openlogi.agent.service"
 HT_FIREWALL="/usr/libexec/ApplicationFirewall/socketfilterfw"
 HT_REPO="JayHome137/OpenLogi"
-HT_RUN_ID="39235760610"
+HT_RUN_ID="${HT_RUN_ID:-}"
 HT_ARTIFACT_ARM64="OpenLogi-macos-dmg-arm64"
 HT_ARTIFACT_X86="OpenLogi-macos-dmg-x86_64"
 HT_PORT="${HT_PORT:-42424}"
@@ -31,6 +31,22 @@ HT_HARDCAP_MIN="${HT_HARDCAP_MIN:-120}"
 HT_OWN_MARKERS="OpenLogi-hwtest|run-openlogi-flow-test|ol-hwtest|com.openlogi.hwtest"
 
 now_ms() { python3 -c 'import time; print(int(time.time()*1000))'; }
+verify_build_run() {
+  printf '%s' "$1" | python3 -c 'import json,re,sys
+try:
+ d=json.load(sys.stdin); sha,branch=sys.argv[1:]
+ ok=bool(re.fullmatch(r"[0-9a-fA-F]{40}",sha)) and bool(branch.strip()) and d.get("name")=="Build" and d.get("head_branch")==branch and d.get("status")=="completed" and d.get("conclusion")=="success" and d.get("head_sha","").lower()==sha.lower()
+except (ValueError,TypeError,AttributeError): ok=False
+sys.exit(0 if ok else 1)' "$2" "${3:-}"
+}
+verify_build_artifact() {
+  printf '%s' "$1" | python3 -c 'import json,sys
+try:
+ d=json.load(sys.stdin); a=d.get("artifacts",[]); found=[x for x in a if x.get("name")==sys.argv[1]]
+ ok=bool(sys.argv[1]) and d.get("total_count")==len(a) and len(found)==1 and found[0].get("expired") is False and found[0].get("size_in_bytes",0)>0
+except (ValueError,TypeError,AttributeError): ok=False
+sys.exit(0 if ok else 1)' "$2"
+}
 fmt_ms() {
   python3 - "${1:-0}" <<'PY'
 import sys, datetime
@@ -138,10 +154,6 @@ elif kind == "gui":
     out = [g.get("bundlePath", "") + "\t" + g.get("bundleIdFallback", "") + "\t" + g.get("mainExecutable", "")]
 elif kind == "rb-apps":
     out = [a["labelPrefix"] + "\t" + a["bundlePath"] for a in d.get("runningBoardApps", [])]
-elif kind == "tcc-services":
-    out = list(d.get("tccReset", {}).get("services", []))
-elif kind == "tcc-bundles":
-    out = list(d.get("tccReset", {}).get("bundleIds", []))
 elif kind == "env-unset":
     out = list(d.get("launchdUserEnvUnsetIfAbsentBefore", []))
 elif kind in ("paths-absent", "paths-empty", "paths-write"):
@@ -865,17 +877,6 @@ remove_test_files() {
     if [[ -z "$(ls -A "$d" 2>/dev/null)" ]]; then rm_safe "$d" || true; else rr LEFTOVER "keep $d" "created during the test but not empty"; fi
   done < <(al_get paths-empty | awk '{ print length($0) "\t" $0 }' | sort -rn | cut -f2-)
 }
-reset_tcc_for_openlogi() {
-  section "TCC reset (OpenLogi bundle ids only)"
-  local s b
-  for s in $(al_get tcc-services); do
-    for b in $(al_get tcc-bundles); do
-      if tccutil reset "$s" "$b" >/dev/null 2>&1 || as_user tccutil reset "$s" "$b" >/dev/null 2>&1; then rr OK "tccutil reset $s $b"
-      else rr WARN "tccutil reset $s $b" "failed - remove manually (RUNBOOK 第 9 步)"; fi
-    done
-  done
-  rr LEFTOVER "Local Network (本地网络) entry for OpenLogi" "tccutil cannot reset it; see RUNBOOK 第 9 步"
-}
 restore_launchd_env() {
   local v pre cur prev
   prev="$HT_WORK/snapshot-pre.json"
@@ -946,7 +947,7 @@ _mutex_take() {
     holder="$(cat "$HT_MUTEX/pid" 2>/dev/null || true)"
     if [[ -n "$holder" ]] && ! kill -0 "$holder" 2>/dev/null; then rm -rf "$HT_MUTEX"; continue; fi
     sleep 1; waited=$((waited + 1))
-    if [[ $waited -gt 300 ]]; then write_r ERROR "restore mutex busy for 300 s - continuing anyway"; return 0; fi
+    if [[ $waited -gt 300 ]]; then write_r ERROR "restore mutex busy for 300 s - refusing concurrent restore"; return 1; fi
   done
   echo $$ >"$HT_MUTEX/pid"
 }
@@ -954,13 +955,13 @@ _mutex_drop() { rm -rf "$HT_MUTEX" 2>/dev/null || true; }
 HT_DIFF_RESULT="n/a"
 full_restore() {
   local reason="$1"
-  _mutex_take
+  _mutex_take || { rr ERROR "restore mutex" "timed out after 300 s; no restore mutations were attempted"; rr_summary || true; return 1; }
   HT_RR_ERR=0; HT_RR_N=0; HT_RR_TEXT=""
   section "FULL RESTORE ($reason)"
   step "stop OpenLogi" stop_openlogi
   step "restore Options+" restore_options_plus
   step "launchd env" restore_launchd_env
-  step "TCC reset" reset_tcc_for_openlogi   # before the app is deleted
+  rr LEFTOVER "OpenLogi TCC permissions" "left unchanged; remove only newly added grants manually (RUNBOOK 收尾)"
   step "files" remove_test_files
   export HT_COMPLETED=1
   [[ -d "$HT_WORK" ]] && { save_state || true; }
@@ -1055,6 +1056,7 @@ outcome = {"0":"Unspecified","1":"Arrived","2":"Partial","3":"Timeout","4":"Canc
 rx = re.compile(r"^(\d{4}-\d\d-\d\dT\d\d:\d\d:\d\d(?:\.\d+)?Z)\s+(\w+)\s+(.*)$")
 field_rx = re.compile(r'(\w+)=("(?:\\.|[^"])*"|\S+)')
 events = []
+seen_lines = set()
 for path in sorted(glob.glob(os.path.join(state_dir, "agent*.log"))):
     try:
         with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -1064,27 +1066,39 @@ for path in sorted(glob.glob(os.path.join(state_dir, "agent*.log"))):
                 ts, lvl, rest = m.group(1), m.group(2), m.group(3)
                 ev = next((p for p in patterns if p in rest), None)
                 if not ev: continue
-                ms = int(datetime.datetime.fromisoformat(ts.replace("Z","+00:00")).timestamp()*1000)
-                if ms < since: continue
+                try: ms = int(datetime.datetime.fromisoformat(ts.replace("Z","+00:00")).timestamp()*1000)
+                except ValueError: continue
+                if ms < since or line in seen_lines: continue
+                seen_lines.add(line)
                 fields = {a: b.strip('"') for a,b in field_rx.findall(rest)}
                 events.append((ms, lvl, ev, fields, line.rstrip()))
     except OSError:
         pass
-events.sort()
-pending = None
+events.sort(key=lambda e: (e[0], e[4]))
+counts = dict(outgoing_arrived=0, incoming_arrived=0, other_terminal=0, diagnostics=0)
+seen_transfers = set()
 for ms, lvl, ev, fields, line in events:
     local = datetime.datetime.fromtimestamp(ms/1000).astimezone().isoformat(timespec="milliseconds")
     fstr = " ".join(f"{k}={v}" for k,v in sorted(fields.items()))
     if "outcome" in fields:
         fstr += f" ({outcome.get(str(fields['outcome']), '?')})"
     print(f"EVENT\t{local}\t{lvl}\t{ev}\t{fstr}")
-    if "edge" in ev.lower():
-        pending = ms
-    if ev == "Flow handoff completed" and pending is not None:
-        print(f"TIMING\tCROSSING DURATION (sender edge->handoff completed): {ms-pending} ms start={pending} end={ms} outcome={outcome.get(str(fields.get('outcome')),'?')}")
-        pending = None
+    if ev in ("Flow handoff completed", "Flow incoming handoff finished"):
+        valid = bool(re.fullmatch(r"[1-9][0-9]*", fields.get("transfer_id", ""))) and fields.get("outcome") == "1"
+        incoming = ev == "Flow incoming handoff finished"
+        if incoming:
+            valid = valid and bool(re.fullmatch(r"[1-9][0-9]*", fields.get("arrived", ""))) and fields.get("arrived") == fields.get("requested")
+        key = (ev, fields.get("peer"), fields.get("transfer_id"))
+        if not valid: counts["other_terminal"] += 1
+        elif key not in seen_transfers:
+            counts["incoming_arrived" if incoming else "outgoing_arrived"] += 1
+            seen_transfers.add(key)
+    elif re.search(r"timed out|rejected|failed|ignored|cancelled|invalid|panicked", ev):
+        counts["diagnostics"] += 1
     if ev == "Flow incoming handoff finished":
-        print(f"TIMING\tRECEIVER arrival: outcome={outcome.get(str(fields.get('outcome')),'?')} arrived={fields.get('arrived')} requested={fields.get('requested')} at={ms}")
+        print(f"TIMING\tRECEIVER result: transfer_id={fields.get('transfer_id')} outcome={outcome.get(str(fields.get('outcome')),'?')} arrived={fields.get('arrived')} requested={fields.get('requested')} at={ms}")
+print("TIMING\tUNAVAILABLE: sender edge->handoff completed; tip has no correlated edge/Accept/ChangeHost start event. Use authorized hardware trace; never time from edge ignored.")
+print("SUMMARY\t" + " ".join(f"{k}={v}" for k,v in counts.items()))
 PY
 }
 set_openlogi_flow_layout() {

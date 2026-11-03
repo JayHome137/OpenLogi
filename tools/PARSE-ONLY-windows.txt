@@ -1,3 +1,5 @@
+*** 暂停：新方案落地前勿跑。以下内容仅作历史记录保留，请勿照此执行。 ***
+
 Parse-only check with the REAL Windows PowerShell 5.1 on Jay-Alienware (.9).
 NOT RUN. Needs Jay's separate authorization. It only parses the files (no script code is executed), needs no admin.
 
